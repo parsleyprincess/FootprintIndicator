@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Footprint Map — engine replay</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#152126;color:#e2edf0;font:13px system-ui,sans-serif}header{padding:18px 24px 12px;border-bottom:1px solid #4a626b;display:flex;justify-content:space-between;align-items:center}h1{font-size:20px;letter-spacing:.3px;margin:0;font-weight:600}small{display:block;color:#9fb6c1;margin-top:4px}.badge{font-size:11px;letter-spacing:1.2px;background:#284752;color:#8de0f4;padding:8px 12px;border:1px solid #3c6879;border-radius:3px}nav{padding:12px 24px;background:#22343d;display:flex;gap:20px;align-items:center;flex-wrap:wrap}label{display:flex;align-items:center;gap:8px;color:#b9ccd5}select{font:inherit;color:#edf6fa;background:#344c58;border:1px solid #58707c;border-radius:3px;padding:6px 10px}#status{margin-left:auto;color:#8bd5b6;font-variant-numeric:tabular-nums}canvas{display:block;width:100%;height:auto;background:#1b292f}footer{padding:12px 24px 20px;color:#9bb0bb;line-height:1.6;border-top:1px solid #344b56}.note{color:#efc483}details{margin-top:8px}summary{cursor:pointer;color:#b5d6e2}a{color:#82d6ed}
+</style>
+<header><div><h1>FOOTPRINT MAP <span style="color:#5ab5cb;font-weight:400">/ ES</span></h1><small>Liquidity history · executed volume · current book</small></div><span class="badge">SYNTHETIC REPLAY · C# ENGINE OUTPUT</span></header>
+<nav>
+<label>View <select id="range"><option value="120">2 minutes</option><option value="30">30 seconds</option></select></label>
+<label>Liquidity <select id="filter"><option value="False">Raw depth</option><option value="True">1.25 s level persistence</option><option value="Following">Persistence + following filter</option></select></label>
+<label>Bubbles <select id="cluster"><option>Smart</option><option>Pixel</option></select></label>
+<label>Color <select id="palette"><option>Classic</option><option>Grayscale</option><option>Ice</option></select></label>
+<label>Style <select id="style"><option value="3d">3D gradient</option><option value="2d">2D gradient</option><option value="pie">Split pie</option></select></label>
+<span id="status"></span>
+</nav>
+<canvas id="chart" width="1520" height="810" aria-label="Synthetic liquidity heatmap with execution bubbles and order-book profile"></canvas>
+<footer><span class="note">This is a browser rendering of tested C# engine output, not a NinjaTrader runtime screenshot.</span> The input is synthetic and is not a trading signal.
+<details><summary>What this replay demonstrates</summary>Bright bands at fixed prices coexist with large near-touch quotes that move with price. The persistence filter evaluates aggregate quantity at an absolute price. The optional following filter suppresses large bands after repeated matching movements relative to the best quote; it can also hide legitimate liquidity. Neither filter identifies individual orders or duplicates TraderMap Pro’s proprietary Bot Remover. A three-second disconnect at 14:31 creates a visible gap. Changing zoom recomputes clusters in C#; a print-size filter and a displayed-cluster filter are separate. Smart clustering and the palette are original approximations. Unknown aggressor volume remains neutral. Profile and CVD totals use all accepted trades.</details></footer>
+<script id="fixture" type="application/json">__REPLAY_JSON__</script>
+<script>
+'use strict';
+const data=JSON.parse(document.getElementById('fixture').textContent),canvas=document.getElementById('chart'),g=canvas.getContext('2d');
+const L=20,T=38,W=1200,H=640,BUY='#2acb8b',SELL='#e15348',UNKNOWN='#aeb8c4';
+const ctrl=id=>document.getElementById(id),color=(b)=>{let total=b.Buy+b.Sell+b.Unknown;if(!total)return UNKNOWN;let buy=b.Buy/total,sell=b.Sell/total,unknown=b.Unknown/total;return `rgb(${Math.round(42*buy+225*sell+174*unknown)},${Math.round(203*buy+83*sell+184*unknown)},${Math.round(139*buy+72*sell+196*unknown)})`};
+function timeLabel(t){const ms=(t-data.startTicks)/10000;return new Date(Date.UTC(2026,9,23,14,30)+ms).toISOString().slice(11,19)}
+function draw(){
+const key=[ctrl('range').value,ctrl('filter').value,ctrl('cluster').value].join(':'),v=data.views.find(v=>v.key===key);
+if(!v)throw new Error('Missing C# replay view '+key);
+const s=v.scene,view=v.viewport;
+const x=t=>L+(t-view.FromTicks)/(view.ToTicks-view.FromTicks)*W,y=p=>T+(view.MaxPriceTick-p)/(view.MaxPriceTick-view.MinPriceTick)*H;
+g.clearRect(0,0,canvas.width,canvas.height);g.fillStyle='#1b292f';g.fillRect(0,0,canvas.width,canvas.height);g.font='12px ui-monospace,monospace';
+g.fillStyle='#91aebd';g.fillText('ES  •  SYNTHETIC  •  0.25 TICK',L,23);g.fillText(`HEAT SCALE  ${s.HeatMaximum.toFixed(0)} contracts  •  ${{True:'PERSISTENT LEVELS',False:'RAW OBSERVATIONS',Following:'PERSISTENCE + FOLLOWING FILTER'}[ctrl('filter').value]}`,L+550,23);
+g.save();g.beginPath();g.rect(L,T,W,H);g.clip();
+const ramp=data.palettes[ctrl('palette').value];
+for(const t of s.Heat){g.fillStyle=ramp[Math.min(1023,Math.max(0,Math.round(t.Quantity/s.HeatMaximum*1023)))];g.fillRect(L+t.X,T+t.Y,t.Width+0.05,t.Height+0.05)}
+// Unobserved interval is a gap, not an inferred empty book.
+const ga=x(data.startTicks+600000000),gb=x(data.startTicks+630000000);
+if(gb>L&&ga<L+W){g.fillStyle='#182126';g.fillRect(ga,T,gb-ga,H);g.fillStyle='#8a9fa8';g.save();g.translate((ga+gb)/2,T+H/2);g.rotate(-Math.PI/2);g.textAlign='center';g.fillText('DEPTH GAP',0,0);g.restore()}
+g.lineWidth=.6;g.strokeStyle='#b3cad326';for(let tick=Math.ceil(view.MinPriceTick/4)*4;tick<=view.MaxPriceTick;tick+=4){g.beginPath();g.moveTo(L,y(tick));g.lineTo(L+W,y(tick));g.stroke()}
+g.setLineDash([2,5]);for(let n=0;n<=8;n++){g.beginPath();g.moveTo(L+n*W/8,T);g.lineTo(L+n*W/8,T+H);g.stroke()}g.setLineDash([]);
+for(const [prop,c] of [['BestBidTick',BUY],['BestAskTick',SELL]]){g.strokeStyle=c;g.lineWidth=1.3;g.beginPath();let prior=null;for(const f of data.frames){if(f.ToTicks<=view.FromTicks||f.FromTicks>=view.ToTicks||f[prop]===null)continue;let xa=x(f.FromTicks),xb=x(f.ToTicks),yy=y(f[prop]);if(!prior||prior.epoch!==f.Epoch||prior.end!==f.FromTicks)g.moveTo(xa,yy);else g.lineTo(xa,yy);g.lineTo(xb,yy);prior={epoch:f.Epoch,end:f.ToTicks}}g.stroke()}
+const bins=new Map();for(const tr of data.trades){if(tr.TimeTicks<view.FromTicks||tr.TimeTicks>=view.ToTicks)continue;const k=Math.floor((x(tr.TimeTicks)-L)/5),b=bins.get(k)||[0,0,0];b[tr.Side]+=tr.Volume;bins.set(k,b)}let barMax=1;for(const b of bins.values())barMax=Math.max(barMax,b[0]+b[1]+b[2]);g.globalAlpha=.64;for(const [k,b]of bins){let base=T+H;for(let side=0;side<3;side++){const h=b[side]/barMax*66;g.fillStyle=[BUY,SELL,UNKNOWN][side];g.fillRect(L+k*5,base-h,4,h);base-=h}}g.globalAlpha=1;
+for(const b of s.Bubbles){if(b.Radius<=0)continue;let xx=L+b.X,yy=T+b.Y,r=b.Radius;g.save();g.globalAlpha=.83;if(ctrl('style').value==='pie'){let a=-Math.PI/2;for(const [q,c]of [[b.Buy,BUY],[b.Sell,SELL],[b.Unknown,UNKNOWN]]){if(!q)continue;let end=a+q/b.Total*Math.PI*2;g.beginPath();g.moveTo(xx,yy);g.arc(xx,yy,r,a,end);g.closePath();g.fillStyle=c;g.fill();a=end}}else{let c=color(b);if(ctrl('style').value==='3d'){let gradient=g.createRadialGradient(xx-r*.35,yy-r*.4,r*.04,xx,yy,r);gradient.addColorStop(0,'#dcece7');gradient.addColorStop(.24,c);gradient.addColorStop(.75,c);gradient.addColorStop(1,'#233b3b');g.fillStyle=gradient}else g.fillStyle=c;g.beginPath();g.arc(xx,yy,r,0,Math.PI*2);g.fill()}g.strokeStyle='#d3ebdc50';g.lineWidth=.6;g.beginPath();g.arc(xx,yy,r,0,Math.PI*2);g.stroke();g.restore()}
+g.restore();
+// Shared price axis, current order book, and actual session traded profile.
+g.fillStyle='#213139';g.fillRect(L+W,T,canvas.width-L-W,H);g.fillStyle='#c9d9e1';g.font='11px ui-monospace,monospace';g.textAlign='right';for(let tick=Math.ceil(view.MinPriceTick/4)*4;tick<=view.MaxPriceTick;tick+=4)g.fillText((tick*data.tickSize).toFixed(2),L+W+68,y(tick)+4);g.textAlign='left';
+const cobX=L+W+78,pX=cobX+110;g.fillStyle='#c9d9e1';g.fillText('COB',cobX,23);g.fillText('SVP',pX,23);
+let bookMax=Math.max(1,...data.Bids.map(b=>b.Quantity),...data.Asks.map(b=>b.Quantity)),profileMax=Math.max(1,...data.Profile.map(p=>p.Total));const row=H/(view.MaxPriceTick-view.MinPriceTick);
+for(const [levels,c]of [[data.Bids,BUY],[data.Asks,SELL]])for(const b of levels){if(b.Tick<view.MinPriceTick||b.Tick>view.MaxPriceTick)continue;let yy=y(b.Tick)-row/2;g.fillStyle=c;g.globalAlpha=.72;g.fillRect(cobX,yy,b.Quantity/bookMax*94,Math.max(1,row-.6));g.globalAlpha=1;if(row>=7){g.fillStyle='#edf4f7';g.fillText(String(b.Quantity),cobX+2,yy+row-1)}}
+for(const p of data.Profile){if(p.Tick<view.MinPriceTick||p.Tick>view.MaxPriceTick)continue;let xx=pX,yy=y(p.Tick)-row/2;for(const [q,c]of [[p.Buy,BUY],[p.Sell,SELL],[p.Unknown,UNKNOWN]]){g.fillStyle=c;let width=q/profileMax*92;g.fillRect(xx,yy,width,Math.max(1,row-.6));xx+=width}}
+g.fillStyle='#a7bec9';for(let n=0;n<=8;n++){g.textAlign=n===0?'left':n===8?'right':'center';g.fillText(timeLabel(view.FromTicks+(view.ToTicks-view.FromTicks)*n/8),L+n*W/8,T+H+20)}g.textAlign='left';
+// CVD does not reset on the connection gap; executions keep their own session accounting.
+const visible=data.trades.filter(t=>t.TimeTicks>=view.FromTicks&&t.TimeTicks<view.ToTicks),dmin=Math.min(0,...visible.map(t=>t.CumulativeDelta)),dmax=Math.max(1,...visible.map(t=>t.CumulativeDelta)),dy=d=>T+H+93-(d-dmin)/(dmax-dmin)*48;
+g.fillStyle='#203039';g.fillRect(L,T+H+32,W,70);g.strokeStyle='#87d6ad';g.lineWidth=1.2;g.beginPath();visible.forEach((t,i)=>{if(i===0)g.moveTo(x(t.TimeTicks),dy(t.CumulativeDelta));else g.lineTo(x(t.TimeTicks),dy(t.CumulativeDelta))});g.stroke();g.fillStyle='#bdd5c4';g.fillText('CVD',L+8,T+H+46);g.fillText(data.CumulativeDelta.toLocaleString(),L+W+20,T+H+76);g.fillStyle='#9bb1bc';g.fillText('SESSION VOLUME '+data.SessionVolume.toLocaleString(),L+W+20,T+H+52);g.fillText('VWAP '+data.SessionVwap.toFixed(2),L+W+20,T+H+98);
+ctrl('status').textContent=`${data.TradeEvents.toLocaleString()} trades · ${s.Bubbles.length.toLocaleString()} bubbles`;
+window.previewReady=true;
+}
+for(const id of ['range','filter','cluster','palette','style'])ctrl(id).addEventListener('change',draw);
+draw();
+</script>
+</html>

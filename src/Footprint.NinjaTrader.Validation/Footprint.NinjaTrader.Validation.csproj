@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Compile-only check against a genuine local NinjaTrader installation.
+       No vendor binaries or API stubs are shipped with this project. -->
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>7.3</LangVersion>
+    <PlatformTarget>x64</PlatformTarget>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <AssemblyName>FootprintMap.Validation</AssemblyName>
+    <RestorePackagesWithLockFile>false</RestorePackagesWithLockFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies.net48" Version="1.0.3" PrivateAssets="all" />
+    <Compile Include="../Footprint.Core/*.cs" />
+    <Compile Include="../NinjaTrader/FootprintMap.cs" />
+    <Reference Include="System.ComponentModel.DataAnnotations" />
+    <Reference Include="WindowsBase" />
+    <Reference Include="PresentationCore" />
+    <Reference Include="PresentationFramework" />
+    <Reference Include="System.Xaml" />
+    <Reference Include="NinjaTrader.Core"><HintPath>$(NinjaTraderBin)/NinjaTrader.Core.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="NinjaTrader.Gui"><HintPath>$(NinjaTraderBin)/NinjaTrader.Gui.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="NinjaTrader.Custom"><HintPath>$(NinjaTraderCustom)/NinjaTrader.Custom.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="SharpDX"><HintPath>$(NinjaTraderBin)/SharpDX.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="SharpDX.Direct2D1"><HintPath>$(NinjaTraderBin)/SharpDX.Direct2D1.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="SharpDX.DirectWrite"><HintPath>$(NinjaTraderBin)/SharpDX.DirectWrite.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+  <Target Name="RequireVendorInstallation" BeforeTargets="ResolveReferences">
+    <Error Condition="!Exists('$(NinjaTraderBin)/NinjaTrader.Core.dll')" Text="Set NinjaTraderBin to the bin folder of your genuine NinjaTrader installation. Vendor references are not bundled." />
+    <Error Condition="!Exists('$(NinjaTraderBin)/NinjaTrader.Gui.dll')" Text="NinjaTrader.Gui.dll is missing from NinjaTraderBin." />
+    <Error Condition="!Exists('$(NinjaTraderCustom)/NinjaTrader.Custom.dll')" Text="Set NinjaTraderCustom to your NinjaTrader user-data bin/Custom folder after a successful NinjaScript Editor compile." />
+    <Error Condition="!Exists('$(NinjaTraderBin)/SharpDX.dll') Or !Exists('$(NinjaTraderBin)/SharpDX.Direct2D1.dll') Or !Exists('$(NinjaTraderBin)/SharpDX.DirectWrite.dll')" Text="Installed NinjaTrader SharpDX references are missing." />
+  </Target>
+</Project>
