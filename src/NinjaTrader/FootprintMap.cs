@@ -16,6 +16,7 @@ using SharpDX;
 using SharpDX.Direct2D1;
 using SharpDX.DirectWrite;
 using DxBrush = SharpDX.Direct2D1.SolidColorBrush;
+using Viewport = FootprintIndicator.Core.Viewport;
 #endregion
 
 // Original implementation. No Bookmap or NinjaTrader proprietary binaries are included.
