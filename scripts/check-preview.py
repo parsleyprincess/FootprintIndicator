@@ -38,6 +38,16 @@ try:
             if '1,872 trades' not in page.locator('#status').inner_text():
                 raise AssertionError('Display controls changed the accepted trade count.')
             states += 1
+        for time_range, study in itertools.product(['120', '30'], ['none', 'absorption', 'sweeps', 'large', 'refill', 'levels', 'footprint', 'tpo']):
+            page.select_option('#range', time_range)
+            page.select_option('#study', study)
+            if '1,872 trades' not in page.locator('#status').inner_text():
+                raise AssertionError('Study display changed source execution accounting.')
+            states += 1
+        for kind in [0, 1, 2, 5]:
+            if not page.evaluate('(kind) => data.flow.Markers.some(m => m.Kind === kind)', kind):
+                raise AssertionError(f'The replay did not exercise study marker kind {kind}.')
+        page.select_option('#study', 'none')
         for selector, value in [('#range', '120'), ('#cluster', 'Smart'), ('#palette', 'Classic'), ('#style', '3d')]:
             page.select_option(selector, value)
         for value, name in [('False', 'raw'), ('True', 'persistent'), ('Following', 'filtered')]:
@@ -47,6 +57,13 @@ try:
         page.select_option('#cluster', 'Pixel')
         page.select_option('#style', 'pie')
         page.screenshot(path=str(artifacts / 'preview-detail.png'), full_page=True)
+        page.select_option('#range', '120')
+        page.select_option('#cluster', 'Smart')
+        page.select_option('#style', '3d')
+        page.select_option('#study', 'absorption')
+        page.screenshot(path=str(artifacts / 'preview-studies.png'), full_page=True)
+        page.select_option('#study', 'levels')
+        page.screenshot(path=str(artifacts / 'preview-profile.png'), full_page=True)
         browser.close()
 finally:
     server.shutdown()

@@ -13,6 +13,7 @@
 <label>Bubbles <select id="cluster"><option>Smart</option><option>Pixel</option></select></label>
 <label>Color <select id="palette"><option>Classic</option><option>Grayscale</option><option>Ice</option></select></label>
 <label>Style <select id="style"><option value="3d">3D gradient</option><option value="2d">2D gradient</option><option value="pie">Split pie</option></select></label>
+<label>Study <select id="study"><option value="none">None</option><option value="absorption">Absorption</option><option value="sweeps">Sweeps</option><option value="large">Large executions</option><option value="refill">Replenishment candidates</option><option value="levels">POC / value area / VWAP bands</option><option value="footprint">10 s footprints</option><option value="tpo">1 min TPO counts</option></select></label>
 <span id="status"></span>
 </nav>
 <canvas id="chart" width="1520" height="810" aria-label="Synthetic liquidity heatmap with execution bubbles and order-book profile"></canvas>
@@ -25,6 +26,26 @@ const data=JSON.parse(document.getElementById('fixture').textContent),canvas=doc
 const L=20,T=38,W=1200,H=640,BUY='#2acb8b',SELL='#e15348',UNKNOWN='#aeb8c4';
 const ctrl=id=>document.getElementById(id),color=(b)=>{let total=b.Buy+b.Sell+b.Unknown;if(!total)return UNKNOWN;let buy=b.Buy/total,sell=b.Sell/total,unknown=b.Unknown/total;return `rgb(${Math.round(42*buy+225*sell+174*unknown)},${Math.round(203*buy+83*sell+184*unknown)},${Math.round(139*buy+72*sell+196*unknown)})`};
 function timeLabel(t){const ms=(t-data.startTicks)/10000;return new Date(Date.UTC(2026,9,23,14,30)+ms).toISOString().slice(11,19)}
+function drawStudy(v,x,y){
+ const p=v.profile,mode=ctrl('study').value,view=v.viewport,row=H/(view.MaxPriceTick-view.MinPriceTick);
+ g.save();g.beginPath();g.rect(L,T,W,H);g.clip();
+ if(mode==='levels')for(const [name,tick,c]of [['POC',p.PocTick,'#f9ce54'],['VAH',p.ValueAreaHighTick,'#80b7ef'],['VAL',p.ValueAreaLowTick,'#80b7ef'],['VWAP',p.Vwap/data.tickSize,'#e8e1ba'],['VWAP + 1σ',p.UpperBand/data.tickSize,'#c9b3e4'],['VWAP − 1σ',p.LowerBand/data.tickSize,'#c9b3e4']]){
+  if(tick===null||!Number.isFinite(tick))continue;g.strokeStyle=c;g.lineWidth=1;g.setLineDash([5,4]);g.beginPath();g.moveTo(L,y(tick));g.lineTo(L+W,y(tick));g.stroke();g.setLineDash([]);g.fillStyle='#18242c';g.fillRect(L+6,y(tick)-12,95,12);g.fillStyle=c;g.font='10px system-ui';g.fillText(name,L+9,y(tick)-2);
+ }
+ if(mode==='footprint')for(const bar of p.Footprints){const a=x(bar.FromTicks),b=x(bar.ToTicks),width=b-a;
+  for(const cell of bar.Levels){const yy=y(cell.Tick)-row/2;g.fillStyle=cell.BuyImbalance?'#206951e0':cell.SellImbalance?'#883c43e0':'#1b2c36ed';g.fillRect(a+1,yy,Math.max(1,width-3),Math.max(1,row-.4));if(width>36&&row>=6){g.font='9px ui-monospace,monospace';g.fillStyle='#d7e9ed';g.textAlign='center';g.fillText(`${cell.Sell} × ${cell.Buy}`,a+width/2,yy+row-1);g.textAlign='left';}}
+ }
+ if(mode==='tpo'){const max=Math.max(1,...p.TpoLevels.map(r=>r.Count));for(const item of p.TpoLevels){const yy=y(item.Tick)-row/2;g.fillStyle='#8aa7e0b0';g.fillRect(L+8,yy,item.Count/max*160,Math.max(1,row-.5));g.fillStyle='#e4eeff';g.font='10px ui-monospace,monospace';g.fillText(String(item.Count),L+12,yy+row-1);}}
+ const kinds={absorption:0,sweeps:1,large:2,refill:5};
+ if(mode in kinds)for(const m of data.flow.Markers){if(m.Kind!==kinds[mode]||m.TimeTicks<view.FromTicks||m.TimeTicks>=view.ToTicks)continue;
+  const xx=x(m.TimeTicks),yy=y(m.PriceTick),offset=m.Side===0?22:-22,c=m.Side===0?'#58ec9a':m.Side===1?'#f285b9':'#c3cbd4';
+  g.strokeStyle=c;g.fillStyle=c;g.lineWidth=1;g.setLineDash([2,3]);g.beginPath();g.moveTo(xx,yy);g.lineTo(xx,yy+offset);g.stroke();g.setLineDash([]);
+  if(mode==='absorption')g.fillRect(xx-3.5,yy-3.5,7,7);else{g.beginPath();g.moveTo(xx,yy-5);g.lineTo(xx+5,yy);g.lineTo(xx,yy+5);g.lineTo(xx-5,yy);g.closePath();g.fill();}
+  g.font='10px ui-monospace,monospace';g.fillText((mode==='absorption'?'AB':mode==='sweeps'?'SW':mode==='large'?'LP':'R?')+' '+m.Volume,xx+3,yy+offset);
+ }
+ if(mode!=='none'){g.fillStyle='#16242cf0';g.fillRect(L+W-460,T+6,450,22);g.fillStyle='#d2e7f0';g.font='11px ui-monospace,monospace';g.fillText(`BOOK ${(p.BookImbalance*100).toFixed(1)}%  VOLUME ${(p.VolumeImbalance*100).toFixed(1)}%  VIEW ${p.TotalVolume.toLocaleString()}`,L+W-450,T+21);}
+ g.restore();
+}
 function draw(){
 const key=[ctrl('range').value,ctrl('filter').value,ctrl('cluster').value].join(':'),v=data.views.find(v=>v.key===key);
 if(!v)throw new Error('Missing C# replay view '+key);
@@ -43,7 +64,7 @@ g.setLineDash([2,5]);for(let n=0;n<=8;n++){g.beginPath();g.moveTo(L+n*W/8,T);g.l
 for(const [prop,c] of [['BestBidTick',BUY],['BestAskTick',SELL]]){g.strokeStyle=c;g.lineWidth=1.3;g.beginPath();let prior=null;for(const f of data.frames){if(f.ToTicks<=view.FromTicks||f.FromTicks>=view.ToTicks||f[prop]===null)continue;let xa=x(f.FromTicks),xb=x(f.ToTicks),yy=y(f[prop]);if(!prior||prior.epoch!==f.Epoch||prior.end!==f.FromTicks)g.moveTo(xa,yy);else g.lineTo(xa,yy);g.lineTo(xb,yy);prior={epoch:f.Epoch,end:f.ToTicks}}g.stroke()}
 const bins=new Map();for(const tr of data.trades){if(tr.TimeTicks<view.FromTicks||tr.TimeTicks>=view.ToTicks)continue;const k=Math.floor((x(tr.TimeTicks)-L)/5),b=bins.get(k)||[0,0,0];b[tr.Side]+=tr.Volume;bins.set(k,b)}let barMax=1;for(const b of bins.values())barMax=Math.max(barMax,b[0]+b[1]+b[2]);g.globalAlpha=.64;for(const [k,b]of bins){let base=T+H;for(let side=0;side<3;side++){const h=b[side]/barMax*66;g.fillStyle=[BUY,SELL,UNKNOWN][side];g.fillRect(L+k*5,base-h,4,h);base-=h}}g.globalAlpha=1;
 for(const b of s.Bubbles){if(b.Radius<=0)continue;let xx=L+b.X,yy=T+b.Y,r=b.Radius;g.save();g.globalAlpha=.83;if(ctrl('style').value==='pie'){let a=-Math.PI/2;for(const [q,c]of [[b.Buy,BUY],[b.Sell,SELL],[b.Unknown,UNKNOWN]]){if(!q)continue;let end=a+q/b.Total*Math.PI*2;g.beginPath();g.moveTo(xx,yy);g.arc(xx,yy,r,a,end);g.closePath();g.fillStyle=c;g.fill();a=end}}else{let c=color(b);if(ctrl('style').value==='3d'){let gradient=g.createRadialGradient(xx-r*.35,yy-r*.4,r*.04,xx,yy,r);gradient.addColorStop(0,'#dcece7');gradient.addColorStop(.24,c);gradient.addColorStop(.75,c);gradient.addColorStop(1,'#233b3b');g.fillStyle=gradient}else g.fillStyle=c;g.beginPath();g.arc(xx,yy,r,0,Math.PI*2);g.fill()}g.strokeStyle='#d3ebdc50';g.lineWidth=.6;g.beginPath();g.arc(xx,yy,r,0,Math.PI*2);g.stroke();g.restore()}
-g.restore();
+g.restore();drawStudy(v,x,y);
 // Shared price axis, current order book, and actual session traded profile.
 g.fillStyle='#213139';g.fillRect(L+W,T,canvas.width-L-W,H);g.fillStyle='#c9d9e1';g.font='11px ui-monospace,monospace';g.textAlign='right';for(let tick=Math.ceil(view.MinPriceTick/4)*4;tick<=view.MaxPriceTick;tick+=4)g.fillText((tick*data.tickSize).toFixed(2),L+W+68,y(tick)+4);g.textAlign='left';
 const cobX=L+W+78,pX=cobX+110;g.fillStyle='#c9d9e1';g.fillText('COB',cobX,23);g.fillText('SVP',pX,23);
@@ -57,7 +78,7 @@ g.fillStyle='#203039';g.fillRect(L,T+H+32,W,70);g.strokeStyle='#87d6ad';g.lineWi
 ctrl('status').textContent=`${data.TradeEvents.toLocaleString()} trades · ${s.Bubbles.length.toLocaleString()} bubbles`;
 window.previewReady=true;
 }
-for(const id of ['range','filter','cluster','palette','style'])ctrl(id).addEventListener('change',draw);
+for(const id of ['range','filter','cluster','palette','style','study'])ctrl(id).addEventListener('change',draw);
 draw();
 </script>
 </html>

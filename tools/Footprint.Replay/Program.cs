@@ -37,6 +37,10 @@ for (int i = 0; i < 480; ++i)
 }
 engine.Advance(start.AddSeconds(120));
 var snapshot = engine.Snapshot();
+var flow = OrderFlowStudies.Build(snapshot, new OrderFlowSettings {
+    AbsorptionVolume = 80, AbsorptionWindowMilliseconds = 1000, SweepVolume = 80,
+    SweepWindowMilliseconds = 1000, SweepMinimumLevels = 2, LargePrintVolume = 60,
+    EnableReplenishment = true, ReplenishmentVolume = 60, MaxMarkers = 5000 });
 var views = new List<object>();
 foreach (int seconds in new[] { 120, 30 })
 foreach (string filter in new[] { "False", "True", "Following" })
@@ -48,7 +52,10 @@ foreach (var cluster in new[] { ClusterMode.Pixel, ClusterMode.Smart })
         AutomaticContrast = true, ContrastPercentile = 98, Clustering = cluster,
         BubbleScale = 4.2, MaxBubbleRadius = 28, SmartPixels = 5, HeatColumnPixels = 2 };
     var scene = Visualization.Build(snapshot, viewport, display);
-    views.Add(new { key = seconds + ":" + filter + ":" + cluster, viewport, scene });
+    var profile = ProfileStudies.Build(snapshot, new ProfileSettings { Scope = ProfileScope.Visible,
+        BuildFootprint = true, FootprintMilliseconds = 10000, BuildTpo = true, TpoMinutes = 1,
+        BookLevels = 40, BookDistanceDecay = 8, LargeLiquidityMinimum = 200 }, viewport.FromTicks, viewport.ToTicks);
+    views.Add(new { key = seconds + ":" + filter + ":" + cluster, viewport, scene, profile });
 }
 var palettes = Enum.GetValues<HeatPalette>().ToDictionary(p => p.ToString(),
     p => Enumerable.Range(0, 1024).Select(i => Visualization.Color(i / 1023.0, p).Hex).ToArray());
@@ -62,7 +69,7 @@ var data = new
     snapshot.Bids, snapshot.Asks, snapshot.Profile,
     frames = snapshot.Frames.Select(f => new { f.FromTicks, f.ToTicks, f.Epoch, f.BestBidTick, f.BestAskTick }),
     trades = snapshot.Trades.Select(t => new { t.TimeTicks, t.PriceTick, t.Volume, t.Side, t.CumulativeDelta }),
-    palettes, views
+    palettes, views, flow
 };
 File.WriteAllText(output, JsonSerializer.Serialize(data, new JsonSerializerOptions { IncludeFields = true }));
 Console.WriteLine($"Replay: {snapshot.DepthEvents:N0} depth events, {snapshot.TradeEvents:N0} trades, {snapshot.Frames.Length:N0} frames.");

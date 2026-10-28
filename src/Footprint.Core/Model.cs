@@ -47,9 +47,10 @@ namespace FootprintIndicator.Core
     public sealed class TradeRecord
     {
         public readonly long TimeTicks, PriceTick, Volume, Sequence, CumulativeDelta;
+        public readonly int Epoch;
         public readonly TradeSide Side;
-        public TradeRecord(long time, long tick, long volume, TradeSide side, long sequence, long delta)
-        { TimeTicks = time; PriceTick = tick; Volume = volume; Side = side; Sequence = sequence; CumulativeDelta = delta; }
+        public TradeRecord(long time, long tick, long volume, TradeSide side, long sequence, long delta, int epoch = 0)
+        { TimeTicks = time; PriceTick = tick; Volume = volume; Side = side; Sequence = sequence; CumulativeDelta = delta; Epoch = epoch; }
     }
     public sealed class ProfileLevel
     {

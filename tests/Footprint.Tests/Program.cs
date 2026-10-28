@@ -14,6 +14,12 @@ internal static class Program
         RegisterBoundaryTests();
         RegisterVisualTests();
         Test("Causal following-liquidity heuristic and independent accounting", () => FollowingFilterTests.Run(Assert));
+        Test("Generic fine, fractional, negative-price instruments and trade reset epochs", () => InstrumentCoverageTests.Run(Assert));
+        Test("Profile value area, VWAP bands, imbalances, footprints and TPO", () => ProfileStudiesTests.Run(Assert));
+        Test("Order-ID MBO sequencing, filters, traces and refill candidates", () => MboTests.Run(Assert));
+        Test("Authoritative depth recovery and restored-history continuity", () => DepthRecoveryTests.Run(Assert));
+        Test("Causal absorption, sweeps, individual prints and coarse liquidity candidates", () => OrderFlowTests.Run(Assert));
+        Test("Checksummed capture archives, safe replacement and historical-only restore", () => HistoryStoreTests.Run(Assert));
         var failures = new List<string>();
         var total = Stopwatch.StartNew();
         foreach (var test in Cases)
@@ -141,12 +147,15 @@ internal static class Program
             Equal(snap.Bids.Length, snap.Bids.Select(l => l.Tick).Distinct().Count(), "no duplicate levels");
             Assert(snap.InvalidEvents >= 2, "both bad events counted");
         });
-        Test("Zero quantity update removes row", () =>
+        Test("Zero quantity update retains its positional slot until explicit removal", () =>
         {
             var engine = Engine();
             engine.Depth(At(0), BookSide.Bid, DepthMutation.Insert, 0, 100, 10);
             engine.Depth(At(1), BookSide.Bid, DepthMutation.Update, 0, 100, 0);
-            Equal(0, engine.Snapshot().Bids.Length, "zero update");
+            Equal(1, engine.Snapshot().Bids.Length, "zero update retains provider position");
+            Equal(0L, engine.Snapshot().Bids[0].Quantity, "zero displayed quantity");
+            engine.Depth(At(2), BookSide.Bid, DepthMutation.Remove, 0, 100, 0);
+            Equal(0, engine.Snapshot().Bids.Length, "explicit remove releases provider position");
         });
         Test("Independent randomized ordered ladder reference model 2000 operations", () =>
         {

@@ -22,7 +22,7 @@ $CoreFiles = @(Get-ChildItem -LiteralPath $CoreDirectory -Filter '*.cs' -File)
 if (-not (Test-Path -LiteralPath $IndicatorFile -PathType Leaf)) {
     throw 'The source package is incomplete. Extract the entire source ZIP before installing.'
 }
-foreach ($RequiredName in @('Model.cs', 'MarketEngine.cs', 'Visualization.cs', 'LiquidityNoiseFilter.cs')) {
+foreach ($RequiredName in @('Model.cs', 'MarketEngine.cs', 'Visualization.cs', 'LiquidityNoiseFilter.cs', 'ProfileStudies.cs', 'OrderFlowStudies.cs', 'MboEngine.cs', 'HistoryStore.cs')) {
     if (-not (Test-Path -LiteralPath (Join-Path $CoreDirectory $RequiredName) -PathType Leaf)) {
         throw "The source package is incomplete: $RequiredName is missing. No files were changed."
     }

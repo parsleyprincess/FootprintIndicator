@@ -2,7 +2,7 @@
 
 FootprintMap is an original C# NinjaScript indicator with a Bookmap-style heatmap, execution bubbles, current order book, volume profiles and delta overlays. It requires a Windows installation of NinjaTrader Desktop 8 and actual Level II data for the selected contract.
 
-**Current validation boundary:** the portable C# engine and replay workflow have been tested in the cloud. The NinjaTrader adapter has not yet been compiled against a genuine current NinjaTrader installation or run in its chart host. Treat the first Windows installation as an integration test. A browser replay image is not a NinjaTrader screenshot.
+**Current validation boundary:** the portable C# engine and replay workflow have been tested in the cloud. The user compiled and ran an earlier adapter version, then reported the depth/display problems addressed in this revision. The latest revised adapter has not yet been compiled or run in the genuine Windows chart host here. Treat this update as an integration test. A browser replay image is not a NinjaTrader screenshot.
 
 Official NinjaTrader release/download pages were inaccessible from the research environment. A secondary documentation mirror lists 8.1.8.2, dated August 11, 2026; that does not establish the latest release. Obtain the current supported Desktop release through your existing NinjaTrader account and record its version from the application when validating. The adapter uses conservative C# 7.3 syntax and established NT8 APIs; the portable test runner's .NET 8 runtime is separate from NinjaTrader's .NET Framework host.
 
@@ -28,6 +28,10 @@ NinjaTrader 8\
       MarketEngine.cs
       Visualization.cs
       LiquidityNoiseFilter.cs
+      HistoryStore.cs
+      ProfileStudies.cs
+      OrderFlowStudies.cs
+      MboEngine.cs
 ```
 
 Copy **all `.cs` files** from `src\Footprint.Core` into `bin\Custom\Indicators\FootprintMapCore`, including any additional helper source files supplied in the package. Copy `src\NinjaTrader\FootprintMap.cs` into `bin\Custom\Indicators`.
@@ -60,24 +64,29 @@ This optional external check uses the .NET SDK pinned in `global.json` (8.0.426)
 .\scripts\validate-ninjatrader.ps1 -NinjaTraderBin 'C:\Program Files\NinjaTrader 8\bin'
 ```
 
-## 4. Add the indicator to a supported chart
+## 4. Start with a seconds view
 
 1. Connect the intended data feed and choose one specific futures contract.
-2. Open a **minute or second chart**, with at least two visible bars. These are the supported chart modes for this version. Tick, volume, range, Renko and other non-time charts are not presented as equivalent to Bookmap's continuous time axis.
-3. Add **FootprintMap** using the chart's Indicators dialog.
-4. Reserve sufficient right margin for the enabled profile columns: approximately **number of columns × Profile column width + 30 pixels**. The default COB and session-profile columns are 100 pixels each, so start with at least **230 pixels**. A warning appears if the columns cover the recorded live edge.
-5. Let the market feed run. The status should progress from waiting for Level II to recorded depth, with bid/ask level counts and an increasing execution count.
+2. Open the chart's **Data Series** dialog. For native seconds bars choose **Type: Second**, then **Value: 1**, **5** or **10**. Do not enter a fractional minute value. A one-minute chart can also host the indicator's independent seconds viewport.
+3. Add **FootprintMap**. Its default **Continuous seconds viewport** shows the latest **120 seconds** of actual capture on its own labeled axis inside the panel. It advances with market timestamps and stays still during a replay pause. This makes recent data visible immediately instead of compressing a few seconds into an hour of native candles.
+4. Hold **Ctrl** while using the mouse wheel over the indicator's chart panel to zoom the continuous time window; hold **Shift** while scrolling up to inspect earlier retained capture and scroll down to return toward the live edge. The initial window and offset are also available under **3a. Time and current price**. Ordinary wheel behavior and scrolling over other panels belong to NinjaTrader.
+5. Keep **Show last price and current quotes**, **Show current order book**, and **Project current depth beyond NOW** enabled. The yellow last-price guide and badge remain visible even with no Level II. An arrow badge means that last price is outside the current visible price range. The translucent strip after **NOW** represents the current observed book; it is never saved as historical heat.
+6. Let the feed run. The status should show the current provider bid/ask level counts and increasing trades. Raw depth is the default; persistence and following suppression are opt-in.
 
-The indicator reads the instrument's tick size, including ES/NQ 0.25, GC/RTY 0.1 and YM 1. It does not assume the same liquidity quantity threshold is appropriate for every contract. Begin with the default relative contrast, then inspect the raw view before adjusting minimum quantities.
+The right-side price scale remains NinjaTrader's native scale. With **Auto scale** and **Show last price and current quotes** enabled, the indicator contributes the latest observed price/quotes with a small tick margin to the live scale. Scrolling the continuous view into history stops that contribution; a manually fixed price scale remains under your control. Drag/zoom that price scale to bring prices near the current market into view. A native scale spanning a large historical move can compress each price level to a fraction of a pixel even when depth is being captured correctly. Use an appropriate visible price range, particularly after switching contracts or loading a chart with distant historical bars. The indicator does not change the instrument's tick size or invent prices to fill the chart.
 
-The main chart uses the native price scale. Expand that scale when you want to see liquidity farther from the market. Opaque background and high indicator z-order provide the heatmap appearance without changing the saved candle style. Toggle those options when you want native bars visible as well.
+**Continuous time uses its own horizontal coordinates.** Read the indicator's inner `HH:mm:ss` axis, rather than the native chart's bottom time labels. Keep the opaque background and covering z-order enabled when using this view; underlying native bars use a different horizontal map. For exact alignment with native bars and chart scroll/zoom, disable **Continuous seconds viewport**. That native mode requires a minute/second chart with at least two visible bars and enough right margin for the profiles: approximately **enabled columns × Profile column width + 30 pixels** (230 pixels for the default COB and SVP). A warning reports when profiles obscure the native live edge. The continuous view reserves column space automatically.
+
+The indicator reads `Instrument.MasterInstrument.TickSize` and formats prices through the platform. This includes NQ/ES, GC/RTY, YM, 6E, 6B and DAX-family instruments using the actual instrument definitions. Futures contract availability and the number of supplied depth rows depend on the connection. Liquidity and execution thresholds are absolute quantities and should be tuned separately for each contract.
+
+When updating an older workspace, copy **all** core files and the adapter, compile, and check the new settings. Existing templates may retain older values such as persistence filtering or a native time view. Start with raw heat, a 120-second continuous window, a suitable vertical price range and default contrast before adding filters.
 
 ## 5. Understand the main settings
 
 | Setting | Meaning |
 | --- | --- |
 | Heat frame duration | Duration-weighted resting quantity per time bucket; smaller buckets require more processing and history storage. Default 250 ms. |
-| Filter by level persistence | Uses quantity continuously observed at a fixed price. Newly added quantity starts young. This is aggregate-level persistence, not the age of identifiable orders. |
+| Filter by level persistence | Default off. Uses quantity continuously observed at a fixed price. Newly added quantity starts young. This is aggregate-level persistence, not the age of identifiable orders. |
 | Level persistence | Required persistence window, default 1,250 ms. Turning the filter off exposes the raw recorded book. |
 | Suppress price-following liquidity | Optional heuristic for repeated large quantities at similar distances from a moving best quote. Default off. It can remove ordinary liquidity and is not TraderMap Pro's proprietary Bot Remover. |
 | Following observation window / moves / size ratio / tolerance | Controls the evidence needed by that heuristic. Test the effect against raw depth; price-following behavior does not establish intent or individual order identity. |
@@ -94,8 +103,22 @@ The main chart uses the native price scale. Expand that scale when you want to s
 | Session reset | Uses the chart Trading Hours template and market-event timestamps. It resets profile/CVD before the first accepted execution in the new observed session. Actual feed capture continues outside the chart session; those executions remain in the previous observed profile until the next session begins. A chart calendar boundary does not pretend that the data connection disconnected. |
 | Data connection name | Blank conservatively responds to any price-feed disconnect. Set the exact configured name when unrelated data connections would otherwise create unnecessary gaps. |
 | History/count budgets | Cap heat frames and trade retention. Session totals remain separate; old dots and the visible profile cannot recover trades discarded by the retention cap. |
+| Save and restore captured history | Default on. Saves every 30 seconds in the background and flushes on orderly removal/shutdown. Restores captured heat, executions and session totals; the live book waits for fresh provider data. |
+| Profile study scope / POC / value area | Captured session or retained visible executions; default value area is 70%. POC/VA lines default on. These are executed-volume statistics. |
+| VWAP / deviation bands | Captured volume-weighted price and weighted price standard deviation under the selected profile scope; VWAP defaults on, bands off. |
+| Book / volume imbalance | Signed bid versus ask displayed depth over the selected nearest levels; signed buy versus sell executed volume excludes unknown aggressors. Optional distance decay weights depth by ticks from best. |
+| Large current levels | Optional absolute displayed MBP quantity highlight; no individual order identity is inferred. |
+| Bid × ask footprint | Optional fixed time/price execution cells, default 10-second buckets. Labels show sell × buy, with unknown volume separately, when zoom provides enough room. Diagonal imbalance coloring uses configurable ratio/minimum volume. |
+| Captured TPO | Optional right column counting time brackets with an actual print at each grouped price. It does not fill unobserved prices between executions; it uses retained visible prints and the selected study scope. |
+| AB / SW / LP | Original absorption and sweep candidates plus actual large individual prints. Default thresholds are starting values, not instrument recommendations. AB color represents the passive side; SW/LP represent the aggressor. |
+| +L / −L / RP? | Optional sampled depth additions/removals and MBP replenishment candidates. These compare duration-weighted frames, not every individual order event. RP? does not prove an iceberg; −L does not prove a cancellation or stop execution. |
+| Show COB bars / Show COB numbers | Separate current-book visibility controls under **5a. Current order book**; both default on. Numbers require enough vertical space. Profile label settings do not affect COB numbers. |
+| Show COB bids / asks / Maximum COB bid or ask rows | Show either side and limit its nearest supplied rows. Zero means all captured rows; the feed and **Maximum depth levels per side** capture budget still limit availability. These display settings do not change heat, capture or imbalance calculations. |
+| Cumulative COB quantities / COB percentage labels | Cumulative sums run from the best quote outward on each side. Percentages replace numeric quantities and divide by the selected row total on that same side, including selected rows outside the visible price range. Cumulative percentages therefore reach 100% at that side's last selected row. Bars always scale quantities against the largest displayed quantity across enabled sides. Both settings default off. |
+| Show profile bars / Profile quantity labels | Independent bars and numbers for session, visible and TPO profiles; both default on. Turning bars off leaves numbers visible wherever rows have enough height. |
+| Align COB to right / Align profiles to right | Independently anchor the bars and numbers at each column's right edge. Both default off for the existing left alignment. |
 
-The adapter interpolates between native time-bar anchors to preserve sub-bar event positions while respecting chart scroll and zoom. It does not claim that NinjaTrader's chart layout, session gaps or proprietary Bookmap clustering are identical.
+In native time mode, the adapter interpolates between native time-bar anchors to preserve sub-bar event positions while respecting chart scroll and zoom. In continuous mode it maps captured event times across the selected seconds window. Bubbles regroup as zoom changes without altering the underlying executions or their profile/CVD accounting. The formulas and marker heuristics are independent implementations, not Bookmap proprietary algorithms.
 
 ## 6. Validate actual feed behavior
 
@@ -106,22 +129,35 @@ Perform these checks with a live feed or a known **Market Replay recording conta
 3. Zoom in and out. Bubble grouping should change while recorded executions remain accounted for; a bubble can disappear when its displayed-cluster threshold no longer qualifies at the new zoom.
 4. Compare total-volume and delta bubbles on mixed buy/sell trading. They intentionally represent different quantities.
 5. Disconnect the price feed and reconnect. Depth should clear, the outage should remain a historical gap, and new depth should rebuild without extending old liquidity across the outage.
-6. Resize the chart, change the visible price range, scroll history, save/reload the workspace, and remove/re-add the indicator. Check the NinjaScript Output and Log windows for errors.
+6. Resize the chart, change the visible price range, Ctrl-wheel zoom, Shift-wheel scroll history, save/reload the workspace, and remove/re-add the indicator. Previously saved capture should remain visible; COB must wait for fresh depth. Check the NinjaScript Output and Log windows for errors.
 7. Check a trading-hours boundary and a backward Market Replay seek. The configured clock-rewind threshold resets recorded state to avoid carrying future data into the earlier replay.
-8. Repeat the basic depth/price/volume checks for the other target contracts and after changing providers.
+8. Attach the indicator after the native Level II window has already populated; the current book should fill from the platform's authoritative ladder without waiting for positional Add(0) events. Compare both sides after reconnect and instrument reset.
+9. Verify same-session restore retains profile/CVD totals, while the first observed event in a new chart Trading Hours session resets them when session reset is enabled.
+10. Enable footprint/TPO and each desired flow study individually, inspect thresholds, and compare its labels with recorded prints and raw depth. Repeat basic depth/price/volume checks for 6E, 6B and the selected DAX-family contract as well as the other target contracts and after changing providers.
+11. Check COB bars and numbers independently, hide each side, limit bid/ask rows separately, and compare cumulative sums and percentages to those selected raw rows. Check profile bars/numbers and left/right alignment in session, visible and TPO columns. Confirm these controls leave captured heat, execution totals and imbalance calculations unchanged.
 
 Record the NinjaTrader version, provider, contract, Trading Hours template, chart period, settings and any errors with the validation result. Actual Windows rendering, provider compatibility and NinjaScript import remain unverified until these checks are completed.
 
-## Missing history and troubleshooting
+## Saved capture and troubleshooting
 
-- **Waiting for Level II:** confirm depth entitlement and the selected contract in a native Level II window. A Level I-only connection cannot populate the heatmap.
-- **No earlier heatmap:** depth capture begins when this indicator receives data. Historical candles and Tick Replay do not recreate historical Level II. The current implementation retains data in memory and starts fresh after removing/reloading the indicator.
-- **No recent depth updates:** this can mean an inactive market or paused replay. The message alone is not a disconnect diagnosis; no new heat is fabricated from wall-clock time.
-- **Profiles cover the live edge:** increase the chart right margin or disable a profile column.
-- **Unsupported chart message:** use a minute/second chart with at least two visible time bars.
+Captured data is stored under **NinjaTrader user-data folder\FootprintMapHistory**. Each archive is keyed by full instrument/contract name, tick size, Trading Hours name and template timezone, heat-frame duration, and persistence duration. Changing the chart from minutes to seconds preserves that capture key. Changing those capture definitions selects a separate archive because stored frame averages/persistence cannot be recalculated exactly under a new definition. Historical event timestamps are stored in NinjaTrader's chart/display time; archive or remove the corresponding saved files before changing the platform's display timezone.
+
+Archives contain bounded retained heat and executions plus the captured session profile/CVD/VWAP. They do not contain a live book or saved order ages. A reload starts a new depth epoch; the gap before fresh feed data remains a gap. A same-session reload continues captured session counters. A new observed Trading Hours session resets them when configured. Saves run every 30 seconds and on orderly termination, so a crash can lose the unsaved interval. Two chart instances share the key; an older capture does not overwrite a newer saved event time, and this is not a multi-instance merge service. A backwards replay may therefore leave a later saved capture intact.
+
+For isolated Playback experiments, disable **Save and restore captured history** before starting the indicator. The archive key does not distinguish live and Playback connections, so this prevents replay experiments from sharing the live capture archive. Keep live capture enabled for ordinary reloads and minute/second chart changes.
+
+- **Waiting for Level II:** confirm depth entitlement and the selected contract in a native Level II window. A Level I-only connection still supplies last-price/bubble data but cannot populate the heatmap.
+- **Depth position gap after installing the older version:** replace all sources and recompile. This adapter now copies both provider ladder sides under `Instrument.SyncMarketDepth` and reconciles aggregate prices; it does not apply incomplete positional callbacks to an empty local book.
+- **No earlier heatmap:** only actual captured/saved depth or a Market Replay stream containing Level II can supply it. OHLC candles and Tick Replay cannot recreate unobserved resting orders. Check the status for saved-capture or restore errors.
+- **Recent heat is a thin strip:** use the continuous 120-second view or a native Second chart and zoom in. Also tighten NinjaTrader's native price scale around the current market. The top LAST/BID/ASK readout identifies where that market is.
+- **Last price outside the view:** the badge shows an up/down arrow. Move the native price scale toward that value. Continuous horizontal zoom deliberately preserves native price coordinates.
+- **No recent depth updates:** this can mean an inactive market or paused replay. The message alone is not a disconnect diagnosis; wall-clock time never extends recorded heat. The translucent current-book projection represents the last observation only.
+- **Profiles cover the live edge:** continuous time reserves their space automatically. In native time mode increase chart right margin or disable a column.
+- **Footprint numbers are absent:** enable the footprint, zoom time until buckets are at least about 48 pixels wide, and expand the price scale until rows are at least about 12 pixels high. Increase ticks per row if appropriate. Smaller cells still show imbalance shading.
+- **Unsupported native chart message:** use a minute/second chart with at least two visible time bars, or enable the independent continuous seconds viewport.
 - **Unexpected gaps with multiple connections:** set Data connection name to the intended price feed's exact name.
-- **Blank or failed rendering:** check NinjaScript Output for the `FootprintMap rendering:` error. Do not treat a blank chart as a passing runtime test.
-- **Capacity warnings:** inspect invalid-event and trimmed-history counts; increase the appropriate budget only when measured resource use permits it.
-- **Session calendar unavailable:** feed capture continues to preserve the positional order book; profile/CVD resets wait for a successful calendar lookup. Check the chart Trading Hours template. Failed lookups are retried at most once per minute of market-event time.
+- **Blank or failed rendering:** check NinjaScript Output for the `FootprintMap rendering:` error. Optional study failures appear on-chart while the base heatmap remains available. Do not treat a blank chart as a passing runtime test.
+- **Capacity warnings:** inspect invalid-event and trimmed-history counts; retained-trade studies and archive history remain limited by the configured capture budgets. Optional flow-marker caps report truncation. Increase budgets only with measured resource headroom.
+- **Session calendar unavailable:** feed capture continues; profile/CVD resets wait for a successful calendar lookup. Check the Trading Hours template. Failed lookups retry at most once per minute of market-event time.
 
-This indicator does not implement exchange MBO order IDs, broker IDs, genuine native iceberg/stop identification, Bookmap's entire add-on ecosystem, or its proprietary filter formulas. The research dossier identifies those distinctions explicitly.
+The portable MBO engine in the source package accepts explicit order events in replay/tests. NinjaTrader's normal `OnMarketDepth` adapter supplies aggregated depth and is **not connected to that MBO engine**. It does not obtain exchange order IDs, broker IDs or true native iceberg/stop identities. The enabled absorption, sweep and replenishment studies retain their explicit candidate/heuristic labels.
