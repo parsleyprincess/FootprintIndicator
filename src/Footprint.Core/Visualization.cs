@@ -37,8 +37,7 @@ namespace FootprintIndicator.Core
 
         private sealed class TradeAccumulator
         {
-            internal long Buy, Sell, Unknown, Total, First, Last, Price;
-            internal TradeSide FirstSide;
+            internal long Buy, Sell, Unknown, Total, First, Last, MinPrice, MaxPrice;
             internal double MeanPrice, MeanTimeOffset;
             internal readonly long Origin;
 
@@ -50,8 +49,7 @@ namespace FootprintIndicator.Core
                 if (Total == 0)
                 {
                     First = Last = trade.TimeTicks;
-                    Price = trade.PriceTick;
-                    FirstSide = trade.Side;
+                    MinPrice = MaxPrice = trade.PriceTick;
                     MeanPrice = trade.PriceTick;
                     MeanTimeOffset = trade.TimeTicks - Origin;
                 }
@@ -62,6 +60,8 @@ namespace FootprintIndicator.Core
                     MeanTimeOffset += ((double)(trade.TimeTicks - Origin) - MeanTimeOffset) * weight;
                     if (trade.TimeTicks < First) First = trade.TimeTicks;
                     if (trade.TimeTicks > Last) Last = trade.TimeTicks;
+                    if (trade.PriceTick < MinPrice) MinPrice = trade.PriceTick;
+                    if (trade.PriceTick > MaxPrice) MaxPrice = trade.PriceTick;
                 }
                 switch (trade.Side)
                 {
@@ -91,12 +91,12 @@ namespace FootprintIndicator.Core
 
         private struct ClusterKey : IEquatable<ClusterKey>
         {
-            internal readonly long Time;
-            internal readonly int Row;
-            internal ClusterKey(long time, int row) { Time = time; Row = row; }
-            public bool Equals(ClusterKey other) { return Time == other.Time && Row == other.Row; }
+            internal readonly long Time, Row;
+            internal readonly int Epoch;
+            internal ClusterKey(long time, long row, int epoch) { Time = time; Row = row; Epoch = epoch; }
+            public bool Equals(ClusterKey other) { return Time == other.Time && Row == other.Row && Epoch == other.Epoch; }
             public override bool Equals(object value) { return value is ClusterKey && Equals((ClusterKey)value); }
-            public override int GetHashCode() { unchecked { return Time.GetHashCode() * 397 ^ Row; } }
+            public override int GetHashCode() { unchecked { return (Time.GetHashCode() * 397 ^ Row.GetHashCode()) * 397 ^ Epoch; } }
         }
 
         /// <summary>
@@ -130,11 +130,14 @@ namespace FootprintIndicator.Core
                 !Finite(settings.ContrastPercentile) || settings.ContrastPercentile <= 0 || settings.ContrastPercentile > 100 ||
                 !Finite(settings.ManualMaximum) || settings.ManualMaximum <= 0 ||
                 !Finite(settings.Gamma) || settings.Gamma <= 0 || settings.Gamma > 20 ||
+                !Finite(settings.HeatFloorPercent) || settings.HeatFloorPercent < 0 || settings.HeatFloorPercent > 99 ||
                 settings.HeatColumnPixels < 1 || settings.HeatColumnPixels > 32768)
                 throw new ArgumentOutOfRangeException("settings", "Invalid heatmap scale, threshold or resolution.");
             if (settings.ClusterMilliseconds < 1 || settings.ClusterVolume < 1 || settings.SmartPixels < 1 ||
+                settings.VolumeAnchorSeconds < 1 || settings.VolumeAnchorSeconds > 86400 ||
                 settings.SmartPixels > 32768 || settings.MinimumTradeSize < 1 || settings.MinimumBubbleVolume < 1 ||
                 !Finite(settings.BubbleScale) || settings.BubbleScale <= 0 || !Finite(settings.MaxBubbleRadius) ||
+                !Finite(settings.BubbleReferenceVolume) || settings.BubbleReferenceVolume <= 0 ||
                 settings.MaxBubbleRadius <= 0 || settings.MaxBubbleRadius > 4096 ||
                 !Enum.IsDefined(typeof(ClusterMode), settings.Clustering) || !Enum.IsDefined(typeof(HeatPalette), settings.Palette))
                 throw new ArgumentOutOfRangeException("settings", "Invalid bubble aggregation, size or color settings.");
@@ -259,7 +262,10 @@ namespace FootprintIndicator.Core
                 double x = part.From / duration * view.Width;
                 double right = part.To / duration * view.Width;
                 if (high <= low || right <= x) continue;
-                double normalized = Math.Pow(Clamp(value / scene.HeatMaximum, 0, 1), settings.Gamma);
+                double floor = settings.HeatFloorPercent / 100;
+                double strength = Clamp(value / scene.HeatMaximum, 0, 1);
+                if (strength <= floor && floor > 0) continue;
+                double normalized = Math.Pow(Clamp((strength - floor) / (1 - floor), 0, 1), settings.Gamma);
                 tiles.Add(new HeatTile {
                     X = (float)x, Y = (float)((view.MaxPriceTick - high) / priceRange * view.Height),
                     Width = (float)(right - x), Height = (float)((high - low) / priceRange * view.Height),
@@ -278,18 +284,22 @@ namespace FootprintIndicator.Core
             Dictionary<long, ProfileAccumulator> profiles = new Dictionary<long, ProfileAccumulator>();
             double priceRange = view.MaxPriceTick - view.MinPriceTick;
             double pricePadding = settings.MaxBubbleRadius / view.Height * priceRange;
+            bool sequential = settings.Clustering == ClusterMode.Volume || settings.Clustering == ClusterMode.Price ||
+                settings.Clustering == ClusterMode.PriceAndSide;
             foreach (TradeRecord trade in source)
             {
-                if (trade == null || trade.Volume <= 0 || trade.TimeTicks < view.FromTicks || trade.TimeTicks >= view.ToTicks) continue;
-                if (trade.PriceTick >= view.MinPriceTick && trade.PriceTick <= view.MaxPriceTick)
+                if (trade == null || trade.Volume <= 0) continue;
+                bool visibleTime = trade.TimeTicks >= view.FromTicks && trade.TimeTicks < view.ToTicks;
+                if (visibleTime && trade.PriceTick >= view.MinPriceTick && trade.PriceTick <= view.MaxPriceTick)
                 {
                     ProfileAccumulator profile;
                     if (!profiles.TryGetValue(trade.PriceTick, out profile))
                     { profile = new ProfileAccumulator(); profiles.Add(trade.PriceTick, profile); }
                     profile.Add(trade);
                 }
-                if (trade.Volume >= settings.MinimumTradeSize && trade.PriceTick >= view.MinPriceTick - pricePadding &&
-                    trade.PriceTick <= view.MaxPriceTick + pricePadding) trades.Add(trade);
+                if (trade.Volume >= settings.MinimumTradeSize && (sequential ||
+                    (visibleTime && trade.PriceTick >= view.MinPriceTick - pricePadding &&
+                    trade.PriceTick <= view.MaxPriceTick + pricePadding))) trades.Add(trade);
             }
             List<long> prices = new List<long>(profiles.Keys);
             prices.Sort();
@@ -308,54 +318,73 @@ namespace FootprintIndicator.Core
             List<TradeAccumulator> groups = new List<TradeAccumulator>();
             Dictionary<ClusterKey, TradeAccumulator> bins = new Dictionary<ClusterKey, TradeAccumulator>();
             TradeAccumulator current = null;
+            TradeRecord previous = null;
+            long runVolume = 0;
             double duration = view.ToTicks - view.FromTicks;
             long timeStep = (long)settings.ClusterMilliseconds * TimeSpan.TicksPerMillisecond;
+            long volumeAnchorTicks = (long)settings.VolumeAnchorSeconds * TimeSpan.TicksPerSecond;
+            if (settings.Clustering == ClusterMode.Pixel)
+                timeStep = (long)Math.Max(1, Math.Ceiling(duration / view.Width));
+            else if (settings.Clustering == ClusterMode.Smart)
+                timeStep = QuantizedStep(duration / view.Width * settings.SmartPixels);
+            long priceStep = settings.Clustering == ClusterMode.Smart
+                ? QuantizedStep(priceRange / view.Height * settings.SmartPixels) : 1;
             foreach (TradeRecord trade in trades)
             {
-                if (settings.Clustering == ClusterMode.Volume || settings.Clustering == ClusterMode.Price || settings.Clustering == ClusterMode.PriceAndSide)
+                if (settings.Clustering == ClusterMode.Individual)
                 {
-                    bool boundary = current == null;
-                    if (!boundary && settings.Clustering == ClusterMode.Volume) boundary = current.Total >= settings.ClusterVolume;
+                    var individual = new TradeAccumulator(trade.TimeTicks);
+                    individual.Add(trade);
+                    groups.Add(individual);
+                    continue;
+                }
+                if (sequential)
+                {
+                    // Establish run boundaries from retained chronology, including
+                    // offscreen prints. Only the group's visible members are drawn.
+                    bool boundary = previous == null || previous.Epoch != trade.Epoch;
+                    if (!boundary && settings.Clustering == ClusterMode.Volume)
+                        boundary = runVolume >= settings.ClusterVolume ||
+                            FloorDivide(previous.TimeTicks, volumeAnchorTicks) != FloorDivide(trade.TimeTicks, volumeAnchorTicks);
                     if (!boundary && (settings.Clustering == ClusterMode.Price || settings.Clustering == ClusterMode.PriceAndSide))
-                        boundary = current.Price != trade.PriceTick || (settings.Clustering == ClusterMode.PriceAndSide && current.FirstSide != trade.Side);
-                    if (boundary) { current = new TradeAccumulator(view.FromTicks); groups.Add(current); }
+                        boundary = previous.PriceTick != trade.PriceTick ||
+                            (settings.Clustering == ClusterMode.PriceAndSide && previous.Side != trade.Side);
+                    if (boundary) { current = null; runVolume = 0; }
                     // The volume mode keeps the entire closing trade. It never
                     // synthesizes a split execution to hit an exact threshold.
+                    // Absolute-time anchors bound a run's duration and isolate
+                    // later anchors from a partially trimmed retention boundary.
+                    // Saturating boundary evidence also avoids overflow from an
+                    // offscreen large print that will never enter an accumulator.
+                    if (runVolume < settings.ClusterVolume)
+                        runVolume = trade.Volume >= settings.ClusterVolume - runVolume
+                            ? settings.ClusterVolume : runVolume + trade.Volume;
+                    previous = trade;
+                    if (trade.TimeTicks < view.FromTicks || trade.TimeTicks >= view.ToTicks ||
+                        trade.PriceTick < view.MinPriceTick - pricePadding || trade.PriceTick > view.MaxPriceTick + pricePadding) continue;
+                    if (current == null) { current = new TradeAccumulator(trade.TimeTicks); groups.Add(current); }
                     current.Add(trade);
                 }
                 else
                 {
-                    long timeBin;
-                    int priceBin = 0;
-                    if (settings.Clustering == ClusterMode.Time) timeBin = trade.TimeTicks / timeStep;
-                    else
-                    {
-                        double x = (double)(trade.TimeTicks - view.FromTicks) / duration * view.Width;
-                        int footprint = settings.Clustering == ClusterMode.Smart ? settings.SmartPixels : 1;
-                        timeBin = (long)Math.Floor(x / footprint);
-                        if (settings.Clustering == ClusterMode.Smart)
-                        {
-                            double y = (view.MaxPriceTick - trade.PriceTick) / priceRange * view.Height;
-                            priceBin = (int)Math.Floor(y / footprint);
-                        }
-                    }
-                    ClusterKey key = new ClusterKey(timeBin, priceBin);
+                    // Absolute event-time and tick coordinates make grid membership
+                    // independent of panning. Smart changes resolution in powers of
+                    // two, so a small price autoscale does not continually regroup it.
+                    long timeBin = FloorDivide(trade.TimeTicks, timeStep);
+                    long priceBin = settings.Clustering == ClusterMode.Smart ? FloorDivide(trade.PriceTick, priceStep) : 0;
+                    ClusterKey key = new ClusterKey(timeBin, priceBin, trade.Epoch);
                     TradeAccumulator group;
                     if (!bins.TryGetValue(key, out group))
-                    { group = new TradeAccumulator(view.FromTicks); bins.Add(key, group); groups.Add(group); }
+                    { group = new TradeAccumulator(trade.TimeTicks); bins.Add(key, group); groups.Add(group); }
                     group.Add(trade);
                 }
             }
-            // Independent documented approximation: mean cluster volume before
-            // display-threshold filtering, not the vendor's unpublished scaler.
-            double reference = 0;
-            for (int i = 0; i < groups.Count; i++) reference += (groups[i].Total - reference) / (i + 1);
-            scene.BubbleReferenceVolume = Math.Max(1, reference);
+            scene.BubbleReferenceVolume = settings.BubbleReferenceVolume;
             List<Bubble> bubbles = new List<Bubble>(groups.Count);
             foreach (TradeAccumulator group in groups)
             {
                 if (group.Total < settings.MinimumBubbleVolume) continue;
-                long time = view.FromTicks + (long)Math.Round(group.MeanTimeOffset, MidpointRounding.AwayFromZero);
+                long time = group.Origin + (long)Math.Round(group.MeanTimeOffset, MidpointRounding.AwayFromZero);
                 time = Math.Max(group.First, Math.Min(group.Last, time));
                 // Both sides are nonnegative and their sum fits Int64, so their integer
                 // difference is safe. Subtract before converting: double(Buy)-double(Sell)
@@ -364,15 +393,42 @@ namespace FootprintIndicator.Core
                 double radius = represented == 0 ? 0 : Math.Min(settings.MaxBubbleRadius,
                     Math.Max(1, settings.BubbleScale * Math.Sqrt(represented / scene.BubbleReferenceVolume)));
                 bubbles.Add(new Bubble {
-                    X = group.MeanTimeOffset / duration * view.Width,
+                    X = ((double)(group.Origin - view.FromTicks) + group.MeanTimeOffset) / duration * view.Width,
                     Y = (view.MaxPriceTick - group.MeanPrice) / priceRange * view.Height,
                     TimeTicks = time, PriceTick = group.MeanPrice, FromTicks = group.First, ToTicks = group.Last,
+                    MinPriceTick = group.MinPrice, MaxPriceTick = group.MaxPrice,
                     Buy = group.Buy, Sell = group.Sell, Unknown = group.Unknown, Radius = radius
                 });
             }
-            bubbles.Sort(delegate(Bubble a, Bubble b)
-            { int comparison = a.TimeTicks.CompareTo(b.TimeTicks); return comparison != 0 ? comparison : a.PriceTick.CompareTo(b.PriceTick); });
-            scene.Bubbles = bubbles.ToArray();
+            // Equal-time/equal-price prints still have a deterministic order.
+            // List.Sort is unstable: appending unrelated prints could otherwise
+            // reorder older overlapping circles and change the topmost hover hit.
+            int[] paintOrder = new int[bubbles.Count];
+            for (int i = 0; i < paintOrder.Length; i++) paintOrder[i] = i;
+            Array.Sort(paintOrder, delegate(int first, int second)
+            {
+                Bubble a = bubbles[first], b = bubbles[second];
+                int comparison = a.TimeTicks.CompareTo(b.TimeTicks);
+                if (comparison != 0) return comparison;
+                comparison = a.PriceTick.CompareTo(b.PriceTick);
+                return comparison != 0 ? comparison : first.CompareTo(second);
+            });
+            scene.Bubbles = new Bubble[bubbles.Count];
+            for (int i = 0; i < paintOrder.Length; i++) scene.Bubbles[i] = bubbles[paintOrder[i]];
+        }
+
+        private static long FloorDivide(long value, long divisor)
+        {
+            long quotient = value / divisor;
+            return value < 0 && value % divisor != 0 ? quotient - 1 : quotient;
+        }
+
+        private static long QuantizedStep(double requested)
+        {
+            if (requested <= 1) return 1;
+            if (requested >= long.MaxValue) return long.MaxValue;
+            double step = Math.Pow(2, Math.Round(Math.Log(requested, 2), MidpointRounding.AwayFromZero));
+            return step >= long.MaxValue ? long.MaxValue : (long)step;
         }
 
         /// <summary>

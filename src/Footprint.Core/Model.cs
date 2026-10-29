@@ -5,7 +5,7 @@ namespace FootprintIndicator.Core
     public enum BookSide { Bid, Ask }
     public enum DepthMutation { Insert, Update, Remove }
     public enum TradeSide { Buy, Sell, Unknown }
-    public enum ClusterMode { Pixel, Smart, Time, Volume, Price, PriceAndSide }
+    public enum ClusterMode { Pixel, Smart, Time, Volume, Price, PriceAndSide, Individual }
     public enum BubbleColorMode { Gradient, Split, Pie }
     public enum HeatPalette { Classic, Grayscale, Ice }
 
@@ -90,13 +90,20 @@ namespace FootprintIndicator.Core
         public double MinimumLiquidity = 1, TopLiquidityPercent = 100;
         public bool AutomaticContrast = true;
         public double ContrastPercentile = 97, ManualMaximum = 200, Gamma = 1;
+        // Fraction of the contrast ceiling mapped to the dark background before gamma.
+        public double HeatFloorPercent = 0;
         public HeatPalette Palette = HeatPalette.Classic;
         public int HeatColumnPixels = 2;
         public ClusterMode Clustering = ClusterMode.Smart;
         public int ClusterMilliseconds = 100, ClusterVolume = 100, SmartPixels = 8;
+        // Volume runs restart at fixed absolute-time boundaries so trimming an
+        // old partial anchor cannot rephase every later retained cluster.
+        public int VolumeAnchorSeconds = 60;
         public long MinimumTradeSize = 1, MinimumBubbleVolume = 1;
         public bool DeltaBubbles = false;
         public double BubbleScale = 5, MaxBubbleRadius = 35;
+        // A fixed volume reference keeps old executions the same size as new data arrives.
+        public double BubbleReferenceVolume = 100;
     }
     public struct Rgb
     {
@@ -114,6 +121,7 @@ namespace FootprintIndicator.Core
     {
         public double X, Y, Radius, PriceTick;
         public long TimeTicks, FromTicks, ToTicks, Buy, Sell, Unknown;
+        public long MinPriceTick, MaxPriceTick;
         public long Total { get { return Buy + Sell + Unknown; } }
         public long Delta { get { return Buy - Sell; } }
     }

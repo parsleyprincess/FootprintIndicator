@@ -42,23 +42,33 @@ var flow = OrderFlowStudies.Build(snapshot, new OrderFlowSettings {
     SweepWindowMilliseconds = 1000, SweepMinimumLevels = 2, LargePrintVolume = 60,
     EnableReplenishment = true, ReplenishmentVolume = 60, MaxMarkers = 5000 });
 var views = new List<object>();
+var fullLowerPanel = LowerPanel.Build(snapshot, start.Ticks, start.AddSeconds(120).Ticks, 1000);
+var lowerScale = new LowerPanelScale().Update(snapshot.SessionStartTicks,
+    fullLowerPanel.MinDelta, fullLowerPanel.MaxDelta, fullLowerPanel.MaxVolume);
 foreach (int seconds in new[] { 120, 30 })
 foreach (string filter in new[] { "False", "True", "Following" })
 foreach (var cluster in new[] { ClusterMode.Pixel, ClusterMode.Smart })
 {
     var viewport = new Viewport(start.AddSeconds(120 - seconds).Ticks, start.AddSeconds(120).Ticks,
         center - 40, center + 40, 1200, 640);
-    var display = new DisplaySettings { UsePersistence = filter != "False", SuppressFollowingLiquidity = filter == "Following", MinimumLiquidity = 6,
+    DisplaySettings MakeDisplay(bool focused) => new DisplaySettings {
+        UsePersistence = filter != "False", SuppressFollowingLiquidity = filter == "Following", MinimumLiquidity = 6,
         AutomaticContrast = true, ContrastPercentile = 98, Clustering = cluster,
-        BubbleScale = 4.2, MaxBubbleRadius = 28, SmartPixels = 5, HeatColumnPixels = 2 };
+        Gamma = focused ? 2 : 1, HeatFloorPercent = focused ? 20 : 0,
+        BubbleScale = 12, BubbleReferenceVolume = 100, MaxBubbleRadius = 28, SmartPixels = 5, HeatColumnPixels = 2 };
+    var display = MakeDisplay(false);
     var scene = Visualization.Build(snapshot, viewport, display);
+    var focusedDisplay = MakeDisplay(true);
+    var focusedScene = Visualization.Build(snapshot, viewport, focusedDisplay);
     var profile = ProfileStudies.Build(snapshot, new ProfileSettings { Scope = ProfileScope.Visible,
         BuildFootprint = true, FootprintMilliseconds = 10000, BuildTpo = true, TpoMinutes = 1,
         BookLevels = 40, BookDistanceDecay = 8, LargeLiquidityMinimum = 200 }, viewport.FromTicks, viewport.ToTicks);
-    views.Add(new { key = seconds + ":" + filter + ":" + cluster, viewport, scene, profile });
+    views.Add(new { key = seconds + ":" + filter + ":" + cluster, viewport, display, scene, profile,
+        heatColors = HeatColors(scene, display), hoverExamples = HoverExamples(scene, viewport),
+        lowerPanel = LowerPanel.Build(snapshot, viewport.FromTicks, viewport.ToTicks, 1000), lowerScale,
+        focused = new { display = focusedDisplay, scene = focusedScene,
+            heatColors = HeatColors(focusedScene, focusedDisplay), hoverExamples = HoverExamples(focusedScene, viewport) } });
 }
-var palettes = Enum.GetValues<HeatPalette>().ToDictionary(p => p.ToString(),
-    p => Enumerable.Range(0, 1024).Select(i => Visualization.Color(i / 1023.0, p).Hex).ToArray());
 var data = new
 {
     title = "Footprint Map — synthetic engine replay",
@@ -69,7 +79,7 @@ var data = new
     snapshot.Bids, snapshot.Asks, snapshot.Profile,
     frames = snapshot.Frames.Select(f => new { f.FromTicks, f.ToTicks, f.Epoch, f.BestBidTick, f.BestAskTick }),
     trades = snapshot.Trades.Select(t => new { t.TimeTicks, t.PriceTick, t.Volume, t.Side, t.CumulativeDelta }),
-    palettes, views, flow
+    views, flow
 };
 File.WriteAllText(output, JsonSerializer.Serialize(data, new JsonSerializerOptions { IncludeFields = true }));
 Console.WriteLine($"Replay: {snapshot.DepthEvents:N0} depth events, {snapshot.TradeEvents:N0} trades, {snapshot.Frames.Length:N0} frames.");
@@ -77,6 +87,41 @@ Console.WriteLine($"Invalid: {snapshot.InvalidEvents}; late: {snapshot.LateEvent
 Console.WriteLine($"Wrote {views.Count} C#-generated views to {output}");
 if (snapshot.InvalidEvents != 0 || snapshot.LateEvents != 0 || snapshot.TradeEvents != 1872)
     throw new InvalidOperationException("Synthetic replay fixture did not process as expected.");
+
+Dictionary<string, string[]> HeatColors(RenderScene scene, DisplaySettings display)
+{
+    double floor = display.HeatFloorPercent / 100;
+    return Enum.GetValues<HeatPalette>().ToDictionary(p => p.ToString(), p => scene.Heat.Select(tile =>
+        p == display.Palette ? tile.Color.Hex : Visualization.Color(Math.Pow(
+            Math.Clamp((Math.Clamp(tile.Quantity / scene.HeatMaximum, 0, 1) - floor) / (1 - floor), 0, 1),
+            display.Gamma), p).Hex).ToArray());
+}
+
+object[] HoverExamples(RenderScene scene, Viewport viewport)
+{
+    // Deliberately finite examples: these are actual core inspections at the marked
+    // coordinates, not a second JavaScript implementation of the hover algorithm.
+    var samples = new List<object>();
+    void Add(string key, string label, double x, double y)
+    {
+        var result = HoverInspection.Inspect(snapshot, scene, viewport, x, y);
+        if (result != null) samples.Add(new { key, label, result });
+    }
+    double X(long time) => (time - viewport.FromTicks) / (double)(viewport.ToTicks - viewport.FromTicks) * viewport.Width;
+    double Y(long tick) => (viewport.MaxPriceTick - tick) / (viewport.MaxPriceTick - viewport.MinPriceTick) * viewport.Height;
+    var visible = scene.Bubbles.Where(b => b.Radius > 0 && b.X >= 0 && b.X < viewport.Width && b.Y >= 0 && b.Y < viewport.Height).ToArray();
+    var bubble = visible.OrderByDescending(b => b.Total).FirstOrDefault();
+    if (bubble != null) Add("bubble", "Execution cluster", bubble.X, bubble.Y);
+    var unknown = visible.Where(b => b.Unknown > 0).OrderByDescending(b => b.Total).FirstOrDefault();
+    if (unknown != null) Add("unknown", "Cluster with unknown aggressor", unknown.X, unknown.Y);
+    long sampleTime = viewport.FromTicks + (viewport.ToTicks - viewport.FromTicks) * 3 / 4 + TimeSpan.TicksPerMillisecond * 125;
+    Add("wall", "Fixed liquidity wall", X(sampleTime), Y(center - 29));
+    Add("weak", "Small captured liquidity", X(sampleTime), Y(center - 18));
+    long gapTime = start.AddSeconds(61.5).Ticks;
+    if (gapTime >= viewport.FromTicks && gapTime < viewport.ToTicks)
+        Add("gap", "Disconnected interval", X(gapTime), Y(center - 29));
+    return samples.ToArray();
+}
 
 void ApplyBook(BookSide side, List<long> current, List<long> desired, DateTime time, int step)
 {

@@ -20,6 +20,9 @@ internal static class Program
         Test("Authoritative depth recovery and restored-history continuity", () => DepthRecoveryTests.Run(Assert));
         Test("Causal absorption, sweeps, individual prints and coarse liquidity candidates", () => OrderFlowTests.Run(Assert));
         Test("Checksummed capture archives, safe replacement and historical-only restore", () => HistoryStoreTests.Run(Assert));
+        Test("Stable historical bubble groups, fixed sizing and heat contrast floor", () => VisualStabilityTests.Run(Assert));
+        Test("Historical liquidity and execution hover inspection", () => HoverInspectionTests.Run(Assert));
+        Test("Fixed-time volume bins and stable CVD scales", () => LowerPanelTests.Run(Assert));
         var failures = new List<string>();
         var total = Stopwatch.StartNew();
         foreach (var test in Cases)

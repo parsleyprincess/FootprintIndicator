@@ -4,6 +4,8 @@ Research dates: 2026-10-22–23. This report distinguishes directly inspected ev
 
 ## Current release: not yet verified
 
+**October 29 follow-up:** the official release-notes URL was retried. The normal environment request returned a proxy CONNECT 403. An expanded-access retry reached NinjaTrader and returned HTTP 301 to `https://static.ninjatrader.com/support/helpGuides/nt8/release_notes.htm`; following that vendor-provided redirect was blocked with CONNECT 403. The redirect is new reachability evidence, not release-version evidence. The current vendor release remains unverified. Headers and results are retained outside the source distribution under `/workspace/research-assets/ninjatrader/oct29-access/`.
+
 The latest NinjaTrader Desktop version **cannot currently be stated responsibly**. Initially, official release notes, developer documentation, and support requests failed at the environment network proxy with `Tunnel connection failed: 403 Forbidden`. After the environment network changed, those hosts became reachable but returned an actual HTTP 403 body `error code: 1010`, a Cloudflare response. This is a separate vendor-side access problem; repeating the same allowlist edit is not the remedy. A date in this task is not evidence of a particular release. Older versions in sample projects are not the current release.
 
 Required official checks after environment networking is applied:

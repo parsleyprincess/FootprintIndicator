@@ -2,13 +2,19 @@
 
 Checked October 26–28, 2026. This extends the [earlier screenshot analysis](bookmap-visuals.md). The implementation is informed by actual images and decoded demonstration frames, not only product descriptions. These observations do not establish pixel-identical rendering or identical proprietary detection algorithms.
 
-## Requested video: access result
+## Requested video: local upload reviewed October 28
+
+The exact requested reference is now available as the user's uploaded MP4, `YTDown.com_YouTube_Media_z_3M-dz_KCo_Bookmap-Introduction-and-Key-Features_001_1080p.mp4`. It was successfully decoded and visually inspected on October 28: **1920×1080, 30000/1001 frames/second, 92.067120 seconds**, 17,901,733 bytes. The [uploaded-video review](uploaded-video-review.md) records timestamped observations from this reference and the user's separate 80-second NinjaTrader bug recording.
+
+The reference directly shows distinct COB/CVP/SVP columns at **00:20**, coordinated vertical scaling between **00:28.0 and 00:28.5**, and the replay toolbar's **“Faster”** hover tooltip at **01:00**. The inspected samples do not establish a chart-cell or bubble data hover card, a specific bubble aggregation algorithm, or CVD behavior. Its blue/orange lower plots are labeled in an Icebergs/Stops context. The review inspected decoded frames and chronological contact sheets; **audio was not reviewed**.
+
+### Earlier network access results
 
 The exact requested source is [YouTube `z_3M-dz_KCo`](https://www.youtube.com/watch?v=z_3M-dz_KCo). On October 27 the managed runtime reported specification revision 10 with the YouTube hosts in its allowed-host configuration, but HTTP policy readiness was still `unknown`. A fresh HTTPS request through the inherited proxy failed with `Tunnel connection failed: 403 Forbidden`, before the watch page or video was retrieved.
 
 On October 28 at 01:57 UTC the runtime reported revision **13**, `observations_current: true`, and HTTP network policy **`enforced`**, with `www.youtube.com`, `i.ytimg.com` and `*.googlevideo.com` explicitly allowed. This changed readiness justified a fresh attempt. A normal HTTPS request to the exact watch URL, using the inherited proxy and verified TLS, still failed with `Tunnel connection failed: 403 Forbidden`. A separate request for its public YouTube thumbnail on `i.ytimg.com` returned the same tunnel error. The runtime diagnostics history contained no retained records explaining those failures. These results establish that the requests failed before either asset was retrieved; they do not establish why the proxy rejected the connections or whether the video is otherwise publicly available.
 
-**This particular video has not been viewed, and its thumbnail has not been inspected.** The enforced configuration alone does not establish successful access. No alternate network route, authentication workaround or anti-bot bypass was used. The October 28 request outcomes are recorded outside the checkout in `/workspace/research-assets/motion/requested-video-access-2026-10-28.json` and `requested-video-thumbnail-access-2026-10-28.json`.
+Those failed requests predated the successful local-upload review above. They no longer mean the video is unreviewed; the YouTube thumbnail was not retrieved or inspected. The enforced configuration alone did not establish successful network access. No alternate network route, authentication workaround or anti-bot bypass was used. The earlier October 28 request outcomes remain recorded outside the checkout in `/workspace/research-assets/motion/requested-video-access-2026-10-28.json` and `requested-video-thumbnail-access-2026-10-28.json`.
 
 ## Demonstration examined
 
