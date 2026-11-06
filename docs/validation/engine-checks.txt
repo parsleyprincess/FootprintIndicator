@@ -1,22 +1,14 @@
-  Determining projects to restore...
-  All projects are up-to-date for restore.
-  Footprint.Core -> /workspace/FootprintIndicator/src/Footprint.Core/bin/Release/net8.0/Footprint.Core.dll
-  Footprint.Core -> /workspace/FootprintIndicator/src/Footprint.Core/bin/Release/net48/Footprint.Core.dll
-  Footprint.Core -> /workspace/FootprintIndicator/src/Footprint.Core/bin/Release/netstandard2.0/Footprint.Core.dll
+November 6, 2026 — actual portable core test and C# syntax output.
+Core tests execute on .NET 8; syntax parsing does not resolve NinjaTrader APIs.
 
-Build succeeded.
-    0 Warning(s)
-    0 Error(s)
-
-Time Elapsed 00:00:01.95
-PASS Price normalization for NQ ES GC YM RTY tick sizes (3 ms)
-PASS Settings validation and defensive copy (12 ms)
-PASS Bid positional insert shift update remove (2 ms)
+PASS Price normalization for NQ ES GC YM RTY tick sizes (2 ms)
+PASS Settings validation and defensive copy (8 ms)
+PASS Bid positional insert shift update remove (3 ms)
 PASS Ask positions have opposite price ordering (2 ms)
 PASS Contiguous initial updates append while position gaps invalidate side (0 ms)
 PASS Removal price mismatch and duplicate price cannot create ghost depth (1 ms)
 PASS Zero quantity update retains its positional slot until explicit removal (0 ms)
-PASS Independent randomized ordered ladder reference model 2000 operations (85 ms)
+PASS Independent randomized ordered ladder reference model 2000 operations (84 ms)
 PASS Raw liquidity integrates prior size over exact event durations (5 ms)
 PASS Partial snapshots do not advance or double count integrals (0 ms)
 PASS Fixed-price persistence does not age newly added size (0 ms)
@@ -34,9 +26,9 @@ PASS Equal timestamps keep sequence and late timestamps do not rewind (1 ms)
 PASS Session reset clears profile and delta while preserving market history (0 ms)
 PASS Count and time retention are bounded without altering session totals (0 ms)
 PASS Snapshots do not expose mutable engine collections (0 ms)
-PASS Concurrent feed and snapshots remain coherent (10 ms)
-  PERF 20000 market events: 23 ms; retained 1000 trades/100 heat frames (informational, no platform benchmark claim)
-PASS Burst replay performance and memory-budget smoke (24 ms)
+PASS Concurrent feed and snapshots remain coherent (12 ms)
+  PERF 20000 market events: 19 ms; retained 1000 trades/100 heat frames (informational, no platform benchmark claim)
+PASS Burst replay performance and memory-budget smoke (19 ms)
 PASS Provider depth beyond retained prefix cannot invalidate the near book (0 ms)
 PASS Truncated depth reentry waits for an observed row and starts a fresh age (0 ms)
 PASS Ask depth cap preserves the same prefix guarantees with ascending prices (0 ms)
@@ -60,28 +52,25 @@ PASS Price and aggressor clustering respect contiguous runs (0 ms)
 PASS Half-open time viewport counts each boundary trade exactly once (0 ms)
 PASS All same-timestamp prices survive pixel aggregation and visible profile (0 ms)
 PASS Heatmap duration weighting conserves resting quantity units (4 ms)
-PASS Raw and level-persistence modes share data but show distinct quantities (1 ms)
+PASS Raw and level-persistence modes share data but show distinct quantities (0 ms)
 PASS Disconnected heat gap survives even when intervals share one pixel (0 ms)
 PASS Heat tiles stay finite and clipped at viewport edges (0 ms)
 PASS Classic heatmap saturates red and grayscale channels agree (0 ms)
 PASS Invalid render dimensions and settings fail explicitly (0 ms)
 PASS Rendering is deterministic and does not mutate input or totals (2 ms)
-PASS Causal following-liquidity heuristic and independent accounting (20 ms)
-PASS Generic fine, fractional, negative-price instruments and trade reset epochs (5 ms)
-PASS Profile value area, VWAP bands, imbalances, footprints and TPO (27 ms)
-PASS Order-ID MBO sequencing, filters, traces and refill candidates (51 ms)
+PASS Causal following-liquidity heuristic and independent accounting (22 ms)
+PASS Generic fine, fractional, negative-price instruments and trade reset epochs (3 ms)
+PASS Profile value area, VWAP bands, imbalances, footprints and TPO (28 ms)
+PASS Order-ID MBO sequencing, filters, traces and refill candidates (55 ms)
 PASS Authoritative depth recovery and restored-history continuity (6 ms)
-PASS Causal absorption, sweeps, individual prints and coarse liquidity candidates (17 ms)
-PASS Checksummed capture archives, safe replacement and historical-only restore (28 ms)
-PASS Stable historical bubble groups, fixed sizing and heat contrast floor (17 ms)
+PASS Causal absorption, sweeps, individual prints and coarse liquidity candidates (13 ms)
+PASS Checksummed capture archives, safe replacement and historical-only restore (26 ms)
+PASS Stable historical bubble groups, fixed sizing and heat contrast floor (16 ms)
 PASS Historical liquidity and execution hover inspection (6 ms)
 PASS Fixed-time volume bins and stable CVD scales (4 ms)
-RESULT 65 passed, 0 failed, 0 skipped; 7039 assertions; 384 ms
-C# 7.3 syntax: 11 source files, 0 errors. This does not resolve NinjaTrader APIs or validate its runtime.
-Replay: 61,060 depth events, 1,872 trades, 468 frames.
-Invalid: 0; late: 0; session volume: 16,723; CVD: 687.
-Wrote 12 C#-generated views to /workspace/FootprintIndicator/artifacts/replay-data.json
-Wrote standalone preview: /workspace/FootprintIndicator/artifacts/footprint-preview.html (82,448,389 bytes)
+PASS Readable grouped book and volume columns preserve quantities (6 ms)
+PASS Absolute heat bins and stable contrast preserve historical appearance (19 ms)
+PASS Frozen navigation, anchored zoom and readable time grids (8 ms)
+RESULT 68 passed, 0 failed, 0 skipped; 7277 assertions; 409 ms
 
-Final adapter syntax check after DPI and tooltip-layout fixes:
-C# 7.3 syntax: 11 source files, 0 errors. This does not resolve NinjaTrader APIs or validate its runtime.
+C# 7.3 syntax: 13 source files, 0 errors. This does not resolve NinjaTrader APIs or validate its runtime.

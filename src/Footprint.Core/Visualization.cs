@@ -4,6 +4,29 @@ using System.Collections.Generic;
 namespace FootprintIndicator.Core
 {
     /// <summary>
+    /// Session-scoped automatic heat ceiling which never shrinks as older maxima
+    /// scroll out of view. New larger observations can expand it. Reset when heat
+    /// filtering/settings change; this state changes display only, never capture.
+    /// </summary>
+    public sealed class HeatContrastScale
+    {
+        private long session = long.MinValue;
+        private double maximum;
+
+        /// <summary>Pass zero to obtain/reset the held floor before building a scene.</summary>
+        public double Update(long sessionKey, double observedMaximum)
+        {
+            if (double.IsNaN(observedMaximum) || double.IsInfinity(observedMaximum) || observedMaximum < 0)
+                throw new ArgumentOutOfRangeException("observedMaximum");
+            if (session != sessionKey) { session = sessionKey; maximum = 0; }
+            maximum = Math.Max(maximum, observedMaximum);
+            return maximum;
+        }
+
+        public void Reset() { session = long.MinValue; maximum = 0; }
+    }
+
+    /// <summary>
     /// Deterministic, platform-independent display aggregation. This is an original
     /// renderer model, not Bookmap's proprietary contrast or Smart-clustering code.
     /// All coordinates are relative to the supplied viewport's top-left corner.
@@ -32,7 +55,8 @@ namespace FootprintIndicator.Core
         private sealed class HeatAccumulator
         {
             internal int Row, Epoch;
-            internal double From, To, QuantityTime;
+            internal long From, To;
+            internal double QuantityTime;
         }
 
         private sealed class TradeAccumulator
@@ -129,6 +153,7 @@ namespace FootprintIndicator.Core
                 !Finite(settings.TopLiquidityPercent) || settings.TopLiquidityPercent <= 0 || settings.TopLiquidityPercent > 100 ||
                 !Finite(settings.ContrastPercentile) || settings.ContrastPercentile <= 0 || settings.ContrastPercentile > 100 ||
                 !Finite(settings.ManualMaximum) || settings.ManualMaximum <= 0 ||
+                !Finite(settings.AutomaticContrastMinimum) || settings.AutomaticContrastMinimum < 0 ||
                 !Finite(settings.Gamma) || settings.Gamma <= 0 || settings.Gamma > 20 ||
                 !Finite(settings.HeatFloorPercent) || settings.HeatFloorPercent < 0 || settings.HeatFloorPercent > 99 ||
                 settings.HeatColumnPixels < 1 || settings.HeatColumnPixels > 32768)
@@ -150,12 +175,24 @@ namespace FootprintIndicator.Core
             // does not reset causal pattern evidence. Filtering precedes contrast.
             HashSet<HeatCell> followingMask = settings.SuppressFollowingLiquidity
                 ? LiquidityNoiseFilter.BuildMask(frames, settings) : null;
-            int columnPixels = Math.Max(settings.HeatColumnPixels, (view.Width + MaximumColumns - 1) / MaximumColumns);
-            int columns = (view.Width + columnPixels - 1) / columnPixels;
-            int rowBudget = Math.Min(MaximumRows, Math.Max(1, MaximumRegularCells / columns));
+            // Absolute integer-time bins do not slide over the recorded frames as
+            // the live edge advances. Quantized resolution changes on zoom, not
+            // on each subpixel pan. Reserve one column for partial edge bins.
+            long durationTicks = view.ToTicks - view.FromTicks;
+            double requestedStep = Math.Max(durationTicks / (double)view.Width * settings.HeatColumnPixels,
+                durationTicks / (double)(MaximumColumns - 1));
+            long timeStep = (long)CeilingStep(Math.Min(durationTicks, requestedStep));
+            long firstTimeBin = view.FromTicks / timeStep;
+            long finalTimeBin = (view.ToTicks - 1) / timeStep;
+            int columns = checked((int)(finalTimeBin - firstTimeBin + 1));
+            // Edge alignment can add a column during an otherwise identical pan.
+            // Size price bins against the largest count at this resolution so
+            // that crossing an absolute time boundary never changes price groups.
+            long columnBudget = durationTicks / timeStep + (durationTicks % timeStep == 0 ? 1 : 2);
+            int rowBudget = Math.Min(MaximumRows, Math.Max(1, (int)(MaximumRegularCells / columnBudget)));
             double priceRange = view.MaxPriceTick - view.MinPriceTick;
             // A bin is an integer number of ticks, aligned to absolute prices.
-            double ticksPerRow = Math.Max(1, Math.Ceiling((priceRange + 1) / rowBudget));
+            double ticksPerRow = CeilingStep((priceRange + 1) / rowBudget);
             double firstTick = Math.Floor((view.MinPriceTick + 0.5) / ticksPerRow) * ticksPerRow;
             double rowBottom = firstTick - 0.5;
             double duration = view.ToTicks - view.FromTicks;
@@ -185,8 +222,8 @@ namespace FootprintIndicator.Core
                 if (frame.FromTicks < precedingEnd)
                     throw new ArgumentException("Heat frames overlap in time.", "snapshot");
                 precedingEnd = frame.ToTicks;
-                double from = Math.Max(frame.FromTicks, view.FromTicks) - view.FromTicks;
-                double to = Math.Min(frame.ToTicks, view.ToTicks) - view.FromTicks;
+                long from = Math.Max(frame.FromTicks, view.FromTicks);
+                long to = Math.Min(frame.ToTicks, view.ToTicks);
                 if (to <= from) continue;
                 Dictionary<int, double> rows = new Dictionary<int, double>();
                 foreach (HeatCell cell in frame.Cells ?? new HeatCell[0])
@@ -204,13 +241,13 @@ namespace FootprintIndicator.Core
                     rows[row] = next;
                 }
 
-                int firstColumn = Math.Max(0, Math.Min(columns - 1, (int)Math.Floor(from / duration * view.Width / columnPixels)));
-                int finalColumn = Math.Max(firstColumn, Math.Min(columns - 1, (int)Math.Ceiling(to / duration * view.Width / columnPixels) - 1));
+                int firstColumn = (int)(from / timeStep - firstTimeBin);
+                int finalColumn = (int)((to - 1) / timeStep - firstTimeBin);
                 for (int column = firstColumn; column <= finalColumn; column++)
                 {
-                    double columnFrom = (double)(column * columnPixels) / view.Width * duration;
-                    double columnTo = (double)Math.Min(view.Width, (column + 1) * columnPixels) / view.Width * duration;
-                    double partFrom = Math.Max(from, columnFrom), partTo = Math.Min(to, columnTo);
+                    long columnFrom = (firstTimeBin + column) * timeStep;
+                    long columnTo = columnFrom + timeStep;
+                    long partFrom = Math.Max(from, columnFrom), partTo = Math.Min(to, columnTo);
                     if (partTo <= partFrom) continue;
                     foreach (KeyValuePair<int, double> row in rows)
                     {
@@ -240,7 +277,7 @@ namespace FootprintIndicator.Core
             }
             if (quantities.Count == 0)
             {
-                scene.HeatMaximum = settings.AutomaticContrast ? 1 : settings.ManualMaximum;
+                scene.HeatMaximum = settings.AutomaticContrast ? Math.Max(1, settings.AutomaticContrastMinimum) : settings.ManualMaximum;
                 return;
             }
             quantities.Sort();
@@ -249,7 +286,7 @@ namespace FootprintIndicator.Core
             if (retainedStart < 0) retainedStart = ~retainedStart;
             else while (retainedStart > 0 && quantities[retainedStart - 1] == cutoff) retainedStart--;
             double ceiling = settings.AutomaticContrast
-                ? Percentile(quantities, settings.ContrastPercentile / 100, retainedStart)
+                ? Math.Max(settings.AutomaticContrastMinimum, Percentile(quantities, settings.ContrastPercentile / 100, retainedStart))
                 : settings.ManualMaximum;
             scene.HeatMaximum = Math.Max(ceiling, double.Epsilon);
             List<HeatTile> tiles = new List<HeatTile>(parts.Count);
@@ -259,8 +296,8 @@ namespace FootprintIndicator.Core
                 if (!Finite(value) || value < cutoff || value <= 0) continue;
                 double low = Math.Max(view.MinPriceTick, rowBottom + part.Row * ticksPerRow);
                 double high = Math.Min(view.MaxPriceTick, rowBottom + (part.Row + 1) * ticksPerRow);
-                double x = part.From / duration * view.Width;
-                double right = part.To / duration * view.Width;
+                double x = (part.From - view.FromTicks) / duration * view.Width;
+                double right = (part.To - view.FromTicks) / duration * view.Width;
                 if (high <= low || right <= x) continue;
                 double floor = settings.HeatFloorPercent / 100;
                 double strength = Clamp(value / scene.HeatMaximum, 0, 1);
@@ -429,6 +466,27 @@ namespace FootprintIndicator.Core
             if (requested >= long.MaxValue) return long.MaxValue;
             double step = Math.Pow(2, Math.Round(Math.Log(requested, 2), MidpointRounding.AwayFromZero));
             return step >= long.MaxValue ? long.MaxValue : (long)step;
+        }
+
+        private static double CeilingStep(double requested)
+        {
+            if (requested <= 1) return 1;
+            double result = Math.Pow(2, Math.Ceiling(Math.Log(requested, 2)));
+            return double.IsInfinity(result) ? requested : result;
+        }
+
+        /// <summary>
+        /// Color an execution group by its strictly largest classified side.
+        /// Ties and groups led by unknown aggression retain the neutral color.
+        /// </summary>
+        public static Rgb DominantBubbleColor(Bubble bubble, Rgb buy, Rgb sell, Rgb unknown)
+        {
+            if (bubble == null) throw new ArgumentNullException("bubble");
+            if (bubble.Buy < 0 || bubble.Sell < 0 || bubble.Unknown < 0)
+                throw new ArgumentOutOfRangeException("bubble", "Execution quantities cannot be negative.");
+            if (bubble.Buy > bubble.Sell && bubble.Buy > bubble.Unknown) return buy;
+            if (bubble.Sell > bubble.Buy && bubble.Sell > bubble.Unknown) return sell;
+            return unknown;
         }
 
         /// <summary>

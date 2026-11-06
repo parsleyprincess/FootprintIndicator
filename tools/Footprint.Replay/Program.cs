@@ -51,23 +51,42 @@ foreach (var cluster in new[] { ClusterMode.Pixel, ClusterMode.Smart })
 {
     var viewport = new Viewport(start.AddSeconds(120 - seconds).Ticks, start.AddSeconds(120).Ticks,
         center - 40, center + 40, 1200, 640);
-    DisplaySettings MakeDisplay(bool focused) => new DisplaySettings {
+    DisplaySettings MakeDisplay(string preset) => new DisplaySettings {
         UsePersistence = filter != "False", SuppressFollowingLiquidity = filter == "Following", MinimumLiquidity = 6,
-        AutomaticContrast = true, ContrastPercentile = 98, Clustering = cluster,
-        Gamma = focused ? 2 : 1, HeatFloorPercent = focused ? 20 : 0,
+        AutomaticContrast = true, ContrastPercentile = preset == "focused" ? 98 : 100, Clustering = cluster,
+        Gamma = preset == "focused" ? 2 : preset == "balanced" ? 1.4 : 1,
+        HeatFloorPercent = preset == "focused" ? 20 : preset == "balanced" ? 10 : 0,
         BubbleScale = 12, BubbleReferenceVolume = 100, MaxBubbleRadius = 28, SmartPixels = 5, HeatColumnPixels = 2 };
-    var display = MakeDisplay(false);
+    var display = MakeDisplay("normal");
     var scene = Visualization.Build(snapshot, viewport, display);
-    var focusedDisplay = MakeDisplay(true);
+    var balancedDisplay = MakeDisplay("balanced");
+    var balancedScene = Visualization.Build(snapshot, viewport, balancedDisplay);
+    var focusedDisplay = MakeDisplay("focused");
     var focusedScene = Visualization.Build(snapshot, viewport, focusedDisplay);
     var profile = ProfileStudies.Build(snapshot, new ProfileSettings { Scope = ProfileScope.Visible,
         BuildFootprint = true, FootprintMilliseconds = 10000, BuildTpo = true, TpoMinutes = 1,
         BookLevels = 40, BookDistanceDecay = 8, LargeLiquidityMinimum = 200 }, viewport.FromTicks, viewport.ToTicks);
+    double pixelsPerTick = viewport.Height / (viewport.MaxPriceTick - viewport.MinPriceTick);
+    int ticksPerRow = ColumnAggregation.ChooseTicksPerRow(pixelsPerTick, 14);
+    var bookColumns = ColumnAggregation.Book(snapshot.Bids, snapshot.Asks, 0, 0, ticksPerRow, false);
+    var profileColumns = ColumnAggregation.Profile(snapshot.Profile, ticksPerRow);
+    var timeGrid = NiceTimeGrid.Build(viewport.FromTicks, viewport.ToTicks, viewport.Width, 110);
     views.Add(new { key = seconds + ":" + filter + ":" + cluster, viewport, display, scene, profile,
-        heatColors = HeatColors(scene, display), hoverExamples = HoverExamples(scene, viewport),
+        heatColors = HeatColors(scene, display), bubbleColors = BubbleColors(scene), hoverExamples = HoverExamples(scene, viewport),
+        columns = new { ticksPerRow, pixelsPerTick, minimumRowPixels = 14,
+            bookLabel = "COB Σ" + ticksPerRow + "t", profileLabel = "SVP Σ" + ticksPerRow + "t",
+            book = bookColumns, profile = profileColumns, profileMaximum = Math.Max(1, profileColumns.Max(row => row.Total)) },
+        // DateTime ticks exceed JavaScript's exact integer range. Preserve grid
+        // anchors as strings; the renderer only converts relative offsets.
+        timeGrid = new { timeGrid.IntervalTicks, Ticks = timeGrid.Ticks.Select(tick => tick.ToString()).ToArray(),
+            labels = timeGrid.Ticks.Select(tick => new DateTime(tick).ToString("HH:mm:ss")).ToArray() },
         lowerPanel = LowerPanel.Build(snapshot, viewport.FromTicks, viewport.ToTicks, 1000), lowerScale,
+        balanced = new { display = balancedDisplay, scene = balancedScene,
+            heatColors = HeatColors(balancedScene, balancedDisplay), bubbleColors = BubbleColors(balancedScene),
+            hoverExamples = HoverExamples(balancedScene, viewport) },
         focused = new { display = focusedDisplay, scene = focusedScene,
-            heatColors = HeatColors(focusedScene, focusedDisplay), hoverExamples = HoverExamples(focusedScene, viewport) } });
+            heatColors = HeatColors(focusedScene, focusedDisplay), bubbleColors = BubbleColors(focusedScene),
+            hoverExamples = HoverExamples(focusedScene, viewport) } });
 }
 var data = new
 {
@@ -79,7 +98,7 @@ var data = new
     snapshot.Bids, snapshot.Asks, snapshot.Profile,
     frames = snapshot.Frames.Select(f => new { f.FromTicks, f.ToTicks, f.Epoch, f.BestBidTick, f.BestAskTick }),
     trades = snapshot.Trades.Select(t => new { t.TimeTicks, t.PriceTick, t.Volume, t.Side, t.CumulativeDelta }),
-    views, flow
+    views, flow, navigationExamples = NavigationExamples(), bubbleColorExamples = BubbleColorExamples()
 };
 File.WriteAllText(output, JsonSerializer.Serialize(data, new JsonSerializerOptions { IncludeFields = true }));
 Console.WriteLine($"Replay: {snapshot.DepthEvents:N0} depth events, {snapshot.TradeEvents:N0} trades, {snapshot.Frames.Length:N0} frames.");
@@ -95,6 +114,74 @@ Dictionary<string, string[]> HeatColors(RenderScene scene, DisplaySettings displ
         p == display.Palette ? tile.Color.Hex : Visualization.Color(Math.Pow(
             Math.Clamp((Math.Clamp(tile.Quantity / scene.HeatMaximum, 0, 1) - floor) / (1 - floor), 0, 1),
             display.Gamma), p).Hex).ToArray());
+}
+
+object BubbleColors(RenderScene scene)
+{
+    var buy = new Rgb(42, 203, 139); var sell = new Rgb(225, 83, 72); var unknown = new Rgb(174, 184, 196);
+    return new {
+        dominant = scene.Bubbles.Select(b => Visualization.DominantBubbleColor(b, buy, sell, unknown).Hex).ToArray(),
+        gradient = scene.Bubbles.Select(b => b.Total <= 0 ? unknown.Hex : new Rgb(
+            (byte)((buy.R * (double)b.Buy + sell.R * (double)b.Sell + unknown.R * (double)b.Unknown) / b.Total),
+            (byte)((buy.G * (double)b.Buy + sell.G * (double)b.Sell + unknown.G * (double)b.Unknown) / b.Total),
+            (byte)((buy.B * (double)b.Buy + sell.B * (double)b.Sell + unknown.B * (double)b.Unknown) / b.Total)).Hex).ToArray()
+    };
+}
+
+object[] BubbleColorExamples()
+{
+    var buy = new Rgb(42, 203, 139); var sell = new Rgb(225, 83, 72); var unknown = new Rgb(174, 184, 196);
+    return new[] {
+        ("buy", new Bubble { Buy = 12, Sell = 4, Unknown = 2 }),
+        ("sell", new Bubble { Buy = 3, Sell = 12, Unknown = 2 }),
+        ("unknown", new Bubble { Buy = 3, Sell = 4, Unknown = 12 }),
+        ("tie", new Bubble { Buy = 12, Sell = 12, Unknown = 2 }),
+        ("unknown-tie", new Bubble { Buy = 12, Sell = 4, Unknown = 12 }),
+        ("sell-unknown-tie", new Bubble { Buy = 4, Sell = 12, Unknown = 12 }),
+        ("three-way-tie", new Bubble { Buy = 12, Sell = 12, Unknown = 12 }),
+        ("empty", new Bubble())
+    }.Select(example => (object)new { key = example.Item1, bubble = example.Item2,
+        color = Visualization.DominantBubbleColor(example.Item2, buy, sell, unknown).Hex }).ToArray();
+}
+
+object[] NavigationExamples()
+{
+    var navigation = new TimeNavigation(120);
+    var samples = new List<object>();
+    void Add(string key, string label, TimeRange range) => samples.Add(new { key, label,
+        fromTicks = range.FromTicks.ToString(), toTicks = range.ToTicks.ToString(),
+        from = new DateTime(range.FromTicks).ToString("HH:mm:ss.fff"),
+        to = new DateTime(range.ToTicks).ToString("HH:mm:ss.fff"),
+        seconds = range.SpanTicks / (double)TimeSpan.TicksPerSecond, navigation.IsLive });
+    var live = navigation.Range(snapshot.TimeTicks);
+    Add("live", "Live observation plus display padding", live);
+    navigation.Pause();
+    var paused = navigation.Range(snapshot.TimeTicks);
+    Add("paused", "Paused absolute interval", paused);
+    var advanced = navigation.Range(snapshot.TimeTicks + TimeSpan.TicksPerMinute);
+    Add("advanced", "Same pause after another 60 s of feed time", advanced);
+    if (paused.FromTicks != live.FromTicks || paused.ToTicks != live.ToTicks ||
+        advanced.FromTicks != paused.FromTicks || advanced.ToTicks != paused.ToTicks)
+        throw new InvalidOperationException("Replay pause moved the absolute time interval.");
+    navigation.PanSeconds(-30);
+    Add("pan", "Pan 30 s earlier; remain paused", navigation.LastRange);
+    if (navigation.IsLive || navigation.LastRange.FromTicks != paused.FromTicks - 30 * TimeSpan.TicksPerSecond ||
+        navigation.LastRange.ToTicks != paused.ToTicks - 30 * TimeSpan.TicksPerSecond)
+        throw new InvalidOperationException("Replay pan did not preserve its paused time interval.");
+    var before = navigation.LastRange;
+    long anchor = before.FromTicks + before.SpanTicks * 3 / 4;
+    navigation.Zoom(.5, .75);
+    var zoomed = navigation.LastRange;
+    if (zoomed.FromTicks + zoomed.SpanTicks * 3 / 4 != anchor)
+        throw new InvalidOperationException("Replay navigation did not preserve the zoom anchor.");
+    Add("zoom", "Half the window around its 75% time anchor", zoomed);
+    navigation.ResumeLive();
+    var resumed = navigation.Range(snapshot.TimeTicks + TimeSpan.TicksPerMinute);
+    Add("resume", "Resume with the latest observation", resumed);
+    if (!navigation.IsLive || resumed.SpanTicks != zoomed.SpanTicks ||
+        resumed.ToTicks != snapshot.TimeTicks + TimeSpan.TicksPerMinute + zoomed.SpanTicks / 25)
+        throw new InvalidOperationException("Replay resume did not follow the latest observation.");
+    return samples.ToArray();
 }
 
 object[] HoverExamples(RenderScene scene, Viewport viewport)

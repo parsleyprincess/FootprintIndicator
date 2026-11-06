@@ -23,6 +23,9 @@ internal static class Program
         Test("Stable historical bubble groups, fixed sizing and heat contrast floor", () => VisualStabilityTests.Run(Assert));
         Test("Historical liquidity and execution hover inspection", () => HoverInspectionTests.Run(Assert));
         Test("Fixed-time volume bins and stable CVD scales", () => LowerPanelTests.Run(Assert));
+        Test("Readable grouped book and volume columns preserve quantities", () => ColumnAggregationTests.Run(Assert));
+        Test("Absolute heat bins and stable contrast preserve historical appearance", () => HeatStabilityTests.Run(Assert));
+        Test("Frozen navigation, anchored zoom and readable time grids", () => ViewNavigationTests.Run(Assert));
         var failures = new List<string>();
         var total = Stopwatch.StartNew();
         foreach (var test in Cases)

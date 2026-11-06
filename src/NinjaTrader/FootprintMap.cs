@@ -58,7 +58,46 @@ namespace NinjaTrader.NinjaScript.Indicators
         private string historyPath, historyKey, historyNote;
         private System.Threading.Timer historyTimer;
         private ChartControl inputChart;
-        private double zoomSeconds, scrollSeconds;
+        private double zoomSeconds;
+        private TimeNavigation timeNavigation;
+        private PriceNavigation priceNavigation;
+        private EngineSnapshot displayedSnapshot, pausedSnapshot;
+        private long displayedGeneration, pausedGeneration, navigationGeneration = -1;
+        private double displayedBid = double.NaN, displayedAsk = double.NaN;
+        private double pausedBid = double.NaN, pausedAsk = double.NaN;
+        private bool priceCentered = true, hoverPaused, panDragging, panMouseCaptured;
+        private float panX, panY;
+        private bool initialHistoryApplied;
+        private RectangleF priceArea, liveButton, pauseButton, centerButton;
+        private readonly HeatContrastScale heatContrastScale = new HeatContrastScale();
+        private string contrastSettingsKey;
+        private long contrastGeneration = -1;
+        private long displayedEventClock, displayedEventTicks;
+        private long displayedDepthClock, displayedTradeClock, displayedRenderClock;
+        private string displayedConnectionNote, displayedSessionWarning, displayedHistoryNote;
+        private const float PriceAxisWidth = 82;
+        private const float NavigationHeight = 25;
+
+        // One transform is shared by heat, BBO, trades, profiles and hit testing.
+        // The host scale is read only when the explicit native fallback is selected.
+        private sealed class RenderPriceScale
+        {
+            private readonly ChartScale native;
+            private readonly PriceRange range;
+            private readonly double tickSize;
+            public readonly float Top, Bottom;
+            public double MinValue { get { return native == null ? range.MinTick * tickSize : native.GetValueByY(Bottom); } }
+            public double MaxValue { get { return native == null ? range.MaxTick * tickSize : native.GetValueByY(Top); } }
+            public RenderPriceScale(ChartScale nativeScale, PriceRange ownRange, double tick, float top, float bottom)
+            { native = nativeScale; range = ownRange; tickSize = tick; Top = top; Bottom = bottom; }
+            public float GetYByValue(double value)
+            { return native == null ? (float)range.GetY(value / tickSize, Top, Bottom) : native.GetYByValue(value); }
+            public double GetValueByY(float y)
+            { return native == null ? range.GetTick(y, Top, Bottom) * tickSize : native.GetValueByY(y); }
+        }
+
+        private bool OwnPriceScale { get { return ContinuousTimeView && !UseNativePriceScale; } }
+        private bool DisplayPaused { get { return timeNavigation != null && !timeNavigation.IsLive; } }
         private ProfileResult cachedStudies;
         private OrderFlowResult cachedFlow;
         private string studyError;
@@ -110,7 +149,14 @@ namespace NinjaTrader.NinjaScript.Indicators
                     lastDepthClock = lastTradeClock = 0;
                     cachedSnapshot = null;
                     zoomSeconds = VisibleSeconds;
-                    scrollSeconds = HistoryOffsetSeconds;
+                    timeNavigation = new TimeNavigation(VisibleSeconds);
+                    priceNavigation = null;
+                    priceCentered = AutoCenterPrice;
+                    pausedSnapshot = displayedSnapshot = null;
+                    hoverPaused = panDragging = initialHistoryApplied = false;
+                    navigationGeneration = -1;
+                    displayedEventTicks = displayedEventClock = 0;
+                    heatContrastScale.Reset();
                     latestBid = latestAsk = double.NaN;
                     dataConnected = true;
                     RestoreCapture();
@@ -130,7 +176,13 @@ namespace NinjaTrader.NinjaScript.Indicators
                 lock (engineGate) { terminated = true; finalSnapshot = engine == null ? null : engine.Snapshot(); engine = null; cachedSnapshot = null; }
                 if (SaveCapturedHistory && finalSnapshot != null) WriteCapture(finalSnapshot);
                 StopRepaintTimer();
-                lock (renderGate) { cachedScene = null; cachedViewport = null; DisposeRenderResources(); }
+                lock (renderGate)
+                {
+                    displayedSnapshot = pausedSnapshot = null;
+                    cachedScene = null; cachedViewport = null;
+                    cachedStudies = null; cachedFlow = null; cachedLower = null; cachedExecution = null;
+                    DisposeRenderResources();
+                }
             }
         }
 
@@ -335,14 +387,14 @@ namespace NinjaTrader.NinjaScript.Indicators
         {
             MinValue = double.MaxValue;
             MaxValue = double.MinValue;
-            if (terminated || !ShowCurrentPrice || instrumentTickSize <= 0) return;
+            if (terminated || OwnPriceScale || !ShowCurrentPrice || instrumentTickSize <= 0) return;
             EngineSnapshot snapshot;
             double bid, ask;
             lock (renderGate)
             {
                 // A historical inspection must not pull its scale toward today's
                 // price. Manual fixed scaling remains under the chart's control.
-                if (ContinuousTimeView && scrollSeconds > 0) return;
+                if (DisplayPaused) return;
                 lock (engineGate)
                 {
                     if (engine == null) return;
@@ -486,7 +538,12 @@ namespace NinjaTrader.NinjaScript.Indicators
         private void RepaintTick(object sender, EventArgs e)
         {
             // UI refresh only. Wall time must never extend recorded heat during a playback pause or outage.
-            if (!terminated) ForceRefresh();
+            if (!terminated)
+            {
+                if (repaintTimer != null)
+                    repaintTimer.Interval = TimeSpan.FromMilliseconds(SmoothScroll && ContinuousTimeView && !DisplayPaused ? 33 : 250);
+                ForceRefresh();
+            }
         }
 
         private void StopRepaintTimer()
@@ -511,44 +568,81 @@ namespace NinjaTrader.NinjaScript.Indicators
                     chart.LostMouseCapture -= ChartLostMouseCapture;
                     chart.MouseLeave -= ChartMouseLeave;
                     EndQuickDrag(chart);
+                    EndPanDrag(chart);
                 }
             };
             if (timer.Dispatcher.CheckAccess()) stop();
             else timer.Dispatcher.InvokeAsync(stop);
         }
 
+        private void FreezeDisplay(bool fromHover = false)
+        {
+            if (timeNavigation == null || !timeNavigation.HasRange) return;
+            if (!DisplayPaused)
+            {
+                pausedSnapshot = displayedSnapshot;
+                pausedGeneration = displayedGeneration;
+                pausedBid = displayedBid; pausedAsk = displayedAsk;
+                timeNavigation.Pause();
+                cachedFlow = null;
+            }
+            hoverPaused = fromHover;
+            InvalidateDisplayScene();
+        }
+
+        private void ResumeDisplay()
+        {
+            if (timeNavigation == null) return;
+            timeNavigation.ResumeLive();
+            pausedSnapshot = null;
+            hoverPaused = false;
+            cachedFlow = null;
+            // Force a fresh immutable snapshot even if the cache throttle has not elapsed.
+            lock (engineGate) { cachedSnapshot = null; }
+            InvalidateDisplayScene();
+        }
+
         private void ChartMouseWheel(object sender, MouseWheelEventArgs e)
         {
             if (terminated || ChartPanel == null || e.Handled || e.Delta == 0) return;
             float x, y;
-            bool inside = ChartPointer(e, out x, out y);
-            if (inside)
-            {
-                lock (renderGate)
-                {
-                    int slider = QuickSliderAt(x, y);
-                    if (slider >= 0 && Keyboard.Modifiers == ModifierKeys.None)
-                    {
-                        if (slider != 6 || !AutomaticContrast)
-                            SetQuickSlider(slider, QuickSliderPosition(slider) + (e.Delta > 0 ? 0.02 : -0.02));
-                        e.Handled = true;
-                    }
-                }
-                if (e.Handled) { RequestRepaint(); return; }
-            }
-            if (!ContinuousTimeView || !inside) return;
-            ModifierKeys keys = Keyboard.Modifiers;
+            if (!ChartPointer(e, out x, out y)) return;
             lock (renderGate)
             {
-                if ((keys & ModifierKeys.Control) != 0)
-                    zoomSeconds = Math.Max(5, Math.Min(86400, zoomSeconds * (e.Delta > 0 ? 0.8 : 1.25)));
-                else if ((keys & ModifierKeys.Shift) != 0)
-                    scrollSeconds = Math.Max(0, Math.Min(RetentionMinutes * 60, scrollSeconds + (e.Delta > 0 ? 1 : -1) * zoomSeconds / 4));
-                else return;
-                cachedScene = null;
+                ModifierKeys keys = Keyboard.Modifiers;
+                int slider = QuickSliderAt(x, y);
+                if (slider >= 0 && keys == ModifierKeys.None)
+                {
+                    if (slider != 6 || !AutomaticContrast)
+                        SetQuickSlider(slider, QuickSliderPosition(slider) + (e.Delta > 0 ? 0.02 : -0.02));
+                    e.Handled = true;
+                }
+                else if (ContinuousTimeView && QuickContains(priceArea, x, y) && timeNavigation != null)
+                {
+                    double factor = e.Delta > 0 ? 0.8 : 1.25;
+                    if ((keys & ModifierKeys.Alt) != 0 && OwnPriceScale && priceNavigation != null)
+                    {
+                        FreezeDisplay();
+                        priceNavigation.Zoom(factor, Math.Max(0, Math.Min(1, (y - priceArea.Y) / priceArea.Height)));
+                        priceCentered = false;
+                    }
+                    else if ((keys & ModifierKeys.Control) != 0)
+                    {
+                        FreezeDisplay();
+                        timeNavigation.Zoom(factor, Math.Max(0, Math.Min(1, (x - priceArea.X) / priceArea.Width)));
+                    }
+                    else if ((keys & ModifierKeys.Shift) != 0)
+                    {
+                        FreezeDisplay();
+                        timeNavigation.PanSeconds((e.Delta > 0 ? -1 : 1) * timeNavigation.WindowTicks / (double)TimeSpan.TicksPerSecond / 4);
+                    }
+                    else return;
+                    zoomSeconds = timeNavigation.WindowTicks / (double)TimeSpan.TicksPerSecond;
+                    InvalidateDisplayScene();
+                    e.Handled = true;
+                }
             }
-            e.Handled = true;
-            ForceRefresh();
+            if (e.Handled) ForceRefresh();
         }
 
         private void ChartMouseMove(object sender, MouseEventArgs e)
@@ -561,8 +655,23 @@ namespace NinjaTrader.NinjaScript.Indicators
                 if (float.IsNaN(x) || float.IsNaN(y))
                 {
                     EndQuickDrag(sender as ChartControl);
+                    EndPanDrag(sender as ChartControl);
                     hoverActive = false;
+                    if (hoverPaused) ResumeDisplay();
                     return;
+                }
+                if (panDragging)
+                {
+                    if (e.LeftButton != MouseButtonState.Pressed) EndPanDrag(sender as ChartControl);
+                    else
+                    {
+                        timeNavigation.PanSeconds(-(x - panX) / Math.Max(1, priceArea.Width) * timeNavigation.WindowTicks / TimeSpan.TicksPerSecond);
+                        if (OwnPriceScale && priceNavigation != null)
+                            priceNavigation.PanTicks((y - panY) / Math.Max(1, priceArea.Height) * priceNavigation.Range.SpanTicks);
+                        panX = x; panY = y;
+                        InvalidateDisplayScene();
+                        e.Handled = true;
+                    }
                 }
                 if (quickDrag >= 0)
                 {
@@ -571,24 +680,25 @@ namespace NinjaTrader.NinjaScript.Indicators
                     else
                     {
                         SetQuickSlider(quickDrag, QuickPositionAt(x));
-                        hoverActive = false;
                         e.Handled = true;
                     }
                 }
-                if (!e.Handled)
-                    hoverActive = ShowHoverDetails && inside && !QuickContains(quickBounds, x, y);
-                if (hoverActive)
-                {
-                    hoverX = x;
-                    hoverY = y;
-                }
+                bool inspecting = inside && QuickContains(priceArea, x, y) && !e.Handled;
+                if (PauseOnHover && ContinuousTimeView && inspecting && !DisplayPaused) FreezeDisplay(true);
+                else if (hoverPaused && (!PauseOnHover || !inspecting)) ResumeDisplay();
+                hoverActive = ShowHoverDetails && inspecting;
+                if (hoverActive) { hoverX = x; hoverY = y; }
             }
             RequestRepaint();
         }
 
         private void ChartMouseLeave(object sender, MouseEventArgs e)
         {
-            lock (renderGate) { hoverActive = false; }
+            lock (renderGate)
+            {
+                hoverActive = false;
+                if (hoverPaused) ResumeDisplay();
+            }
             RequestRepaint();
         }
 
@@ -609,25 +719,45 @@ namespace NinjaTrader.NinjaScript.Indicators
 
         private void ChartMouseDown(object sender, MouseButtonEventArgs e)
         {
-            if (terminated || !ShowQuickControls || ChartPanel == null || e.Handled || e.ChangedButton != MouseButton.Left) return;
+            if (terminated || ChartPanel == null || e.Handled || e.ChangedButton != MouseButton.Left) return;
             float x, y;
             if (!ChartPointer(e, out x, out y)) return;
             lock (renderGate)
             {
-                if (QuickContains(QuickToggleBounds(), x, y))
+                if (ContinuousTimeView && QuickContains(liveButton, x, y))
+                { ResumeDisplay(); e.Handled = true; }
+                else if (ContinuousTimeView && QuickContains(pauseButton, x, y))
+                { FreezeDisplay(); e.Handled = true; }
+                else if (OwnPriceScale && QuickContains(centerButton, x, y))
+                {
+                    priceCentered = true;
+                    if (displayedSnapshot != null && priceNavigation != null) priceNavigation.CenterOn(MarketCenterTick(displayedSnapshot));
+                    InvalidateDisplayScene(); e.Handled = true;
+                }
+                else if (ContinuousTimeView && QuickContains(priceArea, x, y) && (Keyboard.Modifiers & ModifierKeys.Alt) != 0)
+                {
+                    FreezeDisplay();
+                    ChartControl chart = sender as ChartControl;
+                    if (chart != null && chart.CaptureMouse())
+                    {
+                        panMouseCaptured = panDragging = true;
+                        panX = x; panY = y;
+                        if (OwnPriceScale) priceCentered = false;
+                    }
+                    e.Handled = true;
+                }
+                else if (!ShowQuickControls) return;
+                else if (QuickContains(QuickToggleBounds(), x, y))
                 {
                     QuickControlsExpanded = !quickExpandedLayout;
-                    InvalidateDisplayScene();
-                    e.Handled = true;
+                    InvalidateDisplayScene(); e.Handled = true;
                 }
                 else if (quickExpandedLayout && QuickContains(QuickAutoBounds(), x, y))
                 {
-                    // Starting manual contrast at the current ceiling avoids a brightness jump.
                     if (AutomaticContrast && cachedScene != null)
                         ManualHeatMaximum = Math.Max(0.001, Math.Min(1000000000, cachedScene.HeatMaximum));
                     AutomaticContrast = !AutomaticContrast;
-                    InvalidateDisplayScene();
-                    e.Handled = true;
+                    InvalidateDisplayScene(); e.Handled = true;
                 }
                 else
                 {
@@ -638,11 +768,7 @@ namespace NinjaTrader.NinjaScript.Indicators
                     {
                         SetQuickSlider(slider, QuickPositionAt(x));
                         ChartControl chart = sender as ChartControl;
-                        if (chart != null && chart.CaptureMouse())
-                        {
-                            quickMouseCaptured = true;
-                            quickDrag = slider;
-                        }
+                        if (chart != null && chart.CaptureMouse()) { quickMouseCaptured = true; quickDrag = slider; }
                     }
                 }
                 hoverActive = false;
@@ -655,8 +781,9 @@ namespace NinjaTrader.NinjaScript.Indicators
             if (e.ChangedButton != MouseButton.Left) return;
             lock (renderGate)
             {
-                if (quickDrag < 0) return;
+                if (quickDrag < 0 && !panDragging) return;
                 EndQuickDrag(sender as ChartControl);
+                EndPanDrag(sender as ChartControl);
                 e.Handled = true;
             }
             if (!terminated) ForceRefresh();
@@ -664,14 +791,20 @@ namespace NinjaTrader.NinjaScript.Indicators
 
         private void ChartLostMouseCapture(object sender, MouseEventArgs e)
         {
-            lock (renderGate) { quickDrag = -1; quickMouseCaptured = false; }
+            lock (renderGate) { quickDrag = -1; quickMouseCaptured = panDragging = panMouseCaptured = false; }
         }
 
         private void EndQuickDrag(ChartControl chart)
         {
             bool release = quickMouseCaptured;
-            quickDrag = -1;
-            quickMouseCaptured = false;
+            quickDrag = -1; quickMouseCaptured = false;
+            if (release && chart != null && chart.IsMouseCaptured) chart.ReleaseMouseCapture();
+        }
+
+        private void EndPanDrag(ChartControl chart)
+        {
+            bool release = panMouseCaptured;
+            panDragging = panMouseCaptured = false;
             if (release && chart != null && chart.IsMouseCaptured) chart.ReleaseMouseCapture();
         }
 
@@ -755,7 +888,7 @@ namespace NinjaTrader.NinjaScript.Indicators
             quickExpandedLayout = false;
             if (!ShowQuickControls) return 0;
             float available = ChartPanel.W - columns * ProfileWidth -
-                (ShowCurrentPrice && ShowLastPriceBadge ? LastPriceBadgeWidth : 0) - 80;
+                (ShowCurrentPrice && ShowLastPriceBadge ? LastPriceBadgeWidth : 0) - (OwnPriceScale ? PriceAxisWidth : 0) - 80;
             if (available < 32) return 0;
             quickExpandedLayout = QuickControlsExpanded && available >= 220 && bottom - top >= 374;
             float width = quickExpandedLayout ? 220 : 32;
@@ -775,7 +908,7 @@ namespace NinjaTrader.NinjaScript.Indicators
             Text(quickExpandedLayout ? "−" : "+", toggle.X, toggle.Y + 2, toggle.Width, toggle.Height, Brush(text), false, true);
             if (!quickExpandedLayout) return;
             Text("DISPLAY", quickBounds.X + 12, quickBounds.Y + 10, quickBounds.Width - 48, 20, Brush(text), false);
-            string[] names = { "Brightness", "Black cutoff", "Heat opacity", "Min. level quantity", "Min. bubble volume", "Bubble size", "Heat ceiling" };
+            string[] names = { "Tone (gamma)", "Black cutoff", "Dimming / opacity", "Min. level quantity", "Min. bubble volume", "Bubble size", "Heat ceiling" };
             double shownCeiling = AutomaticContrast && cachedScene != null ? cachedScene.HeatMaximum : ManualHeatMaximum;
             string[] values =
             {
@@ -973,28 +1106,60 @@ namespace NinjaTrader.NinjaScript.Indicators
 
         private void RenderLocked(ChartControl chartControl, ChartScale chartScale)
         {
-            quickBounds = new RectangleF();
+            quickBounds = liveButton = pauseButton = centerButton = priceArea = new RectangleF();
             quickExpandedLayout = false;
-            if (terminated || RenderTarget == null || chartControl == null || chartScale == null || ChartPanel == null || ChartBars == null) return;
-            if (instrumentTickSize <= 0 || double.IsNaN(chartScale.MinValue) || double.IsNaN(chartScale.MaxValue) ||
-                double.IsInfinity(chartScale.MinValue) || double.IsInfinity(chartScale.MaxValue)) return;
+            if (terminated || RenderTarget == null || chartControl == null || chartScale == null || ChartPanel == null || (!ContinuousTimeView && ChartBars == null)) return;
+            if (instrumentTickSize <= 0) return;
+            if (!OwnPriceScale && (!Finite(chartScale.MinValue) || !Finite(chartScale.MaxValue) || chartScale.MaxValue <= chartScale.MinValue)) return;
             float left = ChartPanel.X, top = ChartPanel.Y, bottom = ChartPanel.Y + ChartPanel.H;
             int columns = (ShowCurrentBook ? 1 : 0) + (ShowSessionProfile ? 1 : 0) + (ShowVisibleProfile ? 1 : 0) + (ShowTpoProfile ? 1 : 0);
             float quickWidth = LayoutQuickControls(ChartPanel.X + ChartPanel.W, top, bottom, columns);
             float columnLeft = ChartPanel.X + ChartPanel.W - columns * ProfileWidth - quickWidth;
-            float right = columnLeft - (ShowCurrentPrice && ShowLastPriceBadge ? LastPriceBadgeWidth : 0);
-            if (right - left < 80 || bottom - top < 80) return;
+            float badgeWidth = ShowCurrentPrice && ShowLastPriceBadge ? LastPriceBadgeWidth : 0;
+            float axisWidth = OwnPriceScale ? PriceAxisWidth : 0;
+            float right = columnLeft - badgeWidth - axisWidth;
+            // Header contents reserve space even when their backdrop is disabled.
+            float headerHeight = ShowImbalance ? 126 : ShowStatus ? 102 : ShowCurrentPrice ? 70 : ShowLegend ? 40 : 0;
+            headerHeight = Math.Max(headerHeight, columns > 0 ? 58 : OwnPriceScale ? 42 : 0);
+            float lowerHeight = ShowCumulativeDelta || ShowVolumeBars ? Math.Min(LowerPanelHeight, ChartPanel.H * 0.35f) : 0;
+            float timeBottom = bottom - (ContinuousTimeView ? NavigationHeight : 0);
+            float lowerBottom = timeBottom - (ContinuousTimeView ? 22 : 0);
+            priceArea = new RectangleF(left, top + headerHeight, right - left, lowerBottom - lowerHeight - top - headerHeight);
+            if (priceArea.Width < 80 || priceArea.Height < 40) return;
             EngineSnapshot snapshot;
-            long generation;
-            long now = Stopwatch.GetTimestamp();
-            lock (engineGate)
+            long generation, now = Stopwatch.GetTimestamp();
+            double bid, ask;
+            if (DisplayPaused && pausedSnapshot != null)
+            { snapshot = pausedSnapshot; generation = pausedGeneration; bid = pausedBid; ask = pausedAsk; }
+            else
             {
-                if (engine == null) return;
-                snapshot = SnapshotLocked(now);
-                generation = engineGeneration;
+                lock (engineGate)
+                {
+                    if (engine == null) return;
+                    snapshot = SnapshotLocked(now); generation = engineGeneration;
+                    bid = latestBid; ask = latestAsk;
+                    displayedDepthClock = lastDepthClock; displayedTradeClock = lastTradeClock;
+                    displayedRenderClock = now;
+                    displayedConnectionNote = connectionNote;
+                    displayedSessionWarning = sessionWarning;
+                    displayedHistoryNote = historyNote;
+                }
             }
+            if (navigationGeneration != generation)
+            {
+                if (navigationGeneration >= 0)
+                {
+                    timeNavigation = new TimeNavigation(Math.Max(TimeNavigation.MinimumWindowSeconds, zoomSeconds));
+                    priceNavigation = null;
+                }
+                navigationGeneration = generation;
+            }
+            displayedSnapshot = snapshot; displayedGeneration = generation;
+            displayedBid = bid; displayedAsk = ask;
+            if (displayedEventTicks != snapshot.TimeTicks)
+            { displayedEventTicks = snapshot.TimeTicks; displayedEventClock = now; }
             DateTime from, to;
-            if (!(ContinuousTimeView ? BuildContinuousTimeMap(snapshot, left, right, out from, out to) : BuildTimeMap(chartControl, left, right, out from, out to)))
+            if (!(ContinuousTimeView ? BuildContinuousTimeMap(snapshot, left, right, now, out from, out to) : BuildTimeMap(chartControl, left, right, out from, out to)))
             {
                 EnsureRenderResources();
                 Text(ContinuousTimeView ? "Waiting for the first captured market event or saved history." : "Native time mode requires a minute/second chart with at least two visible time bars.",
@@ -1002,16 +1167,33 @@ namespace NinjaTrader.NinjaScript.Indicators
                 DrawQuickControls(ParseColor(BackgroundHex, new Rgb(30, 36, 47)));
                 return;
             }
-            if (from.Ticks <= 0 || to <= from || chartScale.MaxValue <= chartScale.MinValue) return;
-            Viewport viewport = new Viewport(from.Ticks, to.Ticks,
-                chartScale.MinValue / instrumentTickSize, chartScale.MaxValue / instrumentTickSize,
-                (int)(right - left), (int)(bottom - top));
+            if (from.Ticks < 0 || to <= from) return;
+            if (OwnPriceScale)
+            {
+                double center = MarketCenterTick(snapshot);
+                if (priceNavigation == null) priceNavigation = new PriceNavigation(center, VisiblePriceTicks);
+                else if (priceCentered && !DisplayPaused) priceNavigation.CenterOn(center);
+            }
+            RenderPriceScale scale = new RenderPriceScale(OwnPriceScale ? null : chartScale,
+                OwnPriceScale ? priceNavigation.Range : null, instrumentTickSize, priceArea.Y, priceArea.Y + priceArea.Height);
+            if (!Finite(scale.MinValue) || !Finite(scale.MaxValue) || scale.MaxValue <= scale.MinValue) return;
+            Viewport viewport = new Viewport(from.Ticks, to.Ticks, scale.MinValue / instrumentTickSize, scale.MaxValue / instrumentTickSize,
+                Math.Max(1, (int)priceArea.Width), Math.Max(1, (int)priceArea.Height));
             try
             {
                 EnsureRenderResources();
+                string heatKey = HeatSettingsKey();
+                if (contrastGeneration != generation || contrastSettingsKey != heatKey)
+                {
+                    heatContrastScale.Reset(); contrastGeneration = generation; contrastSettingsKey = heatKey;
+                    cachedScene = null;
+                }
                 if (cachedScene == null || !SameViewport(cachedViewport, viewport) || sceneVersion != snapshot.Version || sceneGeneration != generation)
                 {
-                    cachedScene = Visualization.Build(snapshot, viewport, DisplayOptions());
+                    DisplaySettings settings = DisplayOptions();
+                    settings.AutomaticContrastMinimum = heatContrastScale.Update(snapshot.SessionStartTicks, 0);
+                    cachedScene = Visualization.Build(snapshot, viewport, settings);
+                    if (AutomaticContrast) heatContrastScale.Update(snapshot.SessionStartTicks, cachedScene.HeatMaximum);
                     studyError = null;
                     try { cachedStudies = ProfileStudies.Build(snapshot, StudyOptions(), from.Ticks, to.Ticks); }
                     catch (Exception ex) { cachedStudies = null; studyError = "Profile study: " + ex.Message; }
@@ -1022,9 +1204,7 @@ namespace NinjaTrader.NinjaScript.Indicators
                         try { cachedFlow = OrderFlowStudies.Build(snapshot, FlowOptions()); }
                         catch (Exception ex) { cachedFlow = null; studyError = "Flow study: " + ex.Message; }
                     }
-                    cachedViewport = viewport;
-                    sceneVersion = snapshot.Version;
-                    sceneGeneration = generation;
+                    cachedViewport = viewport; sceneVersion = snapshot.Version; sceneGeneration = generation;
                 }
                 profileMarginWarning = !ContinuousTimeView && columns > 0 && snapshot.TimeTicks > 0 && TimeX(snapshot.TimeTicks) > right;
                 Rgb background = ParseColor(BackgroundHex, new Rgb(30, 36, 47));
@@ -1036,76 +1216,169 @@ namespace NinjaTrader.NinjaScript.Indicators
                 try
                 {
                     if (OpaqueBackground) RenderTarget.FillRectangle(new RectangleF(left, top, ChartPanel.W, ChartPanel.H), Brush(background));
-                    RenderTarget.PushAxisAlignedClip(new RectangleF(left, top, right - left, bottom - top), AntialiasMode.Aliased);
+                    RenderTarget.PushAxisAlignedClip(priceArea, AntialiasMode.Aliased);
                     try
                     {
-                        if (ShowHeatmap) DrawHeat(chartControl, chartScale, viewport, cachedScene, left);
-                        if (ShowPriceGrid) DrawPriceGrid(chartScale, left, right, top, bottom);
-                        if (ShowBestBidAsk) DrawBestQuotes(chartControl, chartScale, snapshot, from.Ticks, to.Ticks, buy, sell);
-                        if (ShowCurrentDepthProjection) DrawCurrentProjection(chartScale, snapshot, cachedScene, left, right, top, bottom);
-                        DrawStudyLines(chartScale, cachedStudies, left, right);
-                        if (ShowFootprint) DrawFootprints(chartScale, cachedStudies, from.Ticks, to.Ticks, buy, sell);
-                        if (cachedFlow != null) DrawFlowMarkers(chartScale, cachedFlow, from.Ticks, to.Ticks, buy, sell);
-                        if (ShowBubbles) DrawBubbles(chartControl, chartScale, cachedScene.Bubbles, buy, sell, unknown);
-                        if (ShowCumulativeDelta || ShowVolumeBars) DrawLowerPanel(chartControl, snapshot, from.Ticks, to.Ticks, left, right, bottom - (ContinuousTimeView ? 23 : 0), buy, sell, background);
-                        if (ContinuousTimeView) DrawTimeAxis(from, to, left, right, bottom, background);
+                        if (ShowHeatmap) DrawHeat(chartControl, scale, viewport, cachedScene, left);
+                        if (ShowPriceGrid) DrawPriceGrid(scale, left, right, priceArea.Y, priceArea.Y + priceArea.Height);
+                        if (ContinuousTimeView && ShowTimeGrid) DrawTimeGrid(from, to, left, right, priceArea.Y, priceArea.Y + priceArea.Height);
+                        if (ShowBestBidAsk) DrawBestQuotes(chartControl, scale, snapshot, from.Ticks, to.Ticks, buy, sell);
+                        if (ShowCurrentDepthProjection) DrawCurrentProjection(scale, snapshot, cachedScene, left, right, priceArea.Y, priceArea.Y + priceArea.Height);
+                        DrawStudyLines(scale, cachedStudies, left, right);
+                        if (ShowFootprint) DrawFootprints(scale, cachedStudies, from.Ticks, to.Ticks, buy, sell);
+                        if (ShowBubbles) DrawBubbles(chartControl, scale, cachedScene.Bubbles, buy, sell, unknown);
+                        // Candidate annotations sit above executions and carry opaque text backplates.
+                        if (cachedFlow != null) DrawFlowMarkers(scale, cachedFlow, from.Ticks, to.Ticks, buy, sell);
                     }
                     finally { RenderTarget.PopAxisAlignedClip(); }
-                    DrawProfiles(chartScale, snapshot, cachedScene, columnLeft, top, bottom, buy, sell, unknown, background);
-                    if (ShowCurrentPrice && ShowLastPriceBadge)
-                        RenderTarget.FillRectangle(new RectangleF(right, top, columnLeft - right, bottom - top), Brush(background));
-                    if (ShowHeaderBackground)
-                        RenderTarget.FillRectangle(new RectangleF(left, top, right - left, ShowImbalance ? 126 : 102), Brush(background, 0.94));
-                    if (ShowCurrentPrice) DrawCurrentPrices(chartScale, snapshot, left, right, top, bottom, buy, sell);
+                    if (ShowCumulativeDelta || ShowVolumeBars) DrawLowerPanel(chartControl, snapshot, from.Ticks, to.Ticks, left, right, lowerBottom, buy, sell, background);
+                    if (ContinuousTimeView) DrawTimeAxis(from, to, left, right, timeBottom, background);
+                    DrawProfiles(scale, snapshot, cachedScene, columnLeft, top, bottom, buy, sell, unknown, background);
+                    if (badgeWidth > 0) RenderTarget.FillRectangle(new RectangleF(right, top, badgeWidth, bottom - top), Brush(background));
+                    if (OwnPriceScale) DrawOwnPriceAxis(scale, right + badgeWidth, top, bottom, background);
+                    if (ShowHeaderBackground) RenderTarget.FillRectangle(new RectangleF(left, top, right - left, headerHeight), Brush(background));
+                    if (ShowCurrentPrice) DrawCurrentPrices(scale, snapshot, left, right, top, bottom, buy, sell);
                     if (ShowLegend) DrawLegend(snapshot, cachedScene, left, top, right, buy, sell);
-                    if (ShowStatus) DrawStatus(snapshot, left, top, right, now);
+                    if (ShowStatus) DrawStatus(snapshot, left, top, right);
                     if (ShowImbalance) DrawStudySummary(cachedStudies, left, top, right, buy, sell);
                     if (studyError != null) Text(studyError, left + 7, top + 123, right - left - 14, 30, Brush(new Rgb(246, 195, 120)), true);
-                    if (ShowHoverDetails) DrawHoverDetails(chartScale, snapshot, viewport, left, right, top, bottom, background);
+                    if (ContinuousTimeView) DrawNavigation(snapshot, left, right, bottom, background);
+                    if (ShowHoverDetails) DrawHoverDetails(scale, snapshot, viewport, left, right, top, bottom, background);
                     DrawQuickControls(background);
                 }
-                finally
-                {
-                    RenderTarget.PopAxisAlignedClip();
-                    RenderTarget.AntialiasMode = priorMode;
-                }
+                finally { RenderTarget.PopAxisAlignedClip(); RenderTarget.AntialiasMode = priorMode; }
                 renderError = null;
             }
-            catch (Exception ex)
-            {
-                // Surface the exact rendering failure once; do not silently claim a blank chart is healthy.
-                ReportRenderError(ex);
-            }
+            catch (Exception ex) { ReportRenderError(ex); }
         }
 
-        private bool BuildContinuousTimeMap(EngineSnapshot snapshot, float left, float right, out DateTime from, out DateTime to)
+        private static bool Finite(double value) { return !double.IsNaN(value) && !double.IsInfinity(value); }
+
+        private double MarketCenterTick(EngineSnapshot snapshot)
+        {
+            if (snapshot.Bids.Length > 0 && snapshot.Asks.Length > 0)
+                return snapshot.Bids[0].Tick / 2.0 + snapshot.Asks[0].Tick / 2.0;
+            if (snapshot.Trades.Length > 0) return snapshot.Trades[snapshot.Trades.Length - 1].PriceTick;
+            if (snapshot.Bids.Length > 0) return snapshot.Bids[0].Tick;
+            if (snapshot.Asks.Length > 0) return snapshot.Asks[0].Tick;
+            if (snapshot.Frames.Length > 0)
+            {
+                HeatFrame frame = snapshot.Frames[snapshot.Frames.Length - 1];
+                if (frame.BestBidTick.HasValue && frame.BestAskTick.HasValue) return frame.BestBidTick.Value / 2.0 + frame.BestAskTick.Value / 2.0;
+                if (frame.BestBidTick.HasValue) return frame.BestBidTick.Value;
+                if (frame.BestAskTick.HasValue) return frame.BestAskTick.Value;
+            }
+            if (Finite(displayedBid)) return displayedBid / instrumentTickSize;
+            if (Finite(displayedAsk)) return displayedAsk / instrumentTickSize;
+            return priceNavigation == null ? 0 : priceNavigation.Range.CenterTick;
+        }
+
+        private string HeatSettingsKey()
+        {
+            return string.Join("|", new object[] { AutomaticContrast, ContrastPercentile,
+                FilterPersistentLiquidity, SuppressFollowingLiquidity, FollowingMinimumMoves, FollowingWindowMilliseconds,
+                FollowingSizeRatio, FollowingSizeTolerance, MinimumLiquidity, TopLiquidityPercent, HeatColumnPixels });
+        }
+
+        private bool BuildContinuousTimeMap(EngineSnapshot snapshot, float left, float right, long now, out DateTime from, out DateTime to)
         {
             from = to = DateTime.MinValue;
             if (snapshot.TimeTicks <= 0) return false;
-            long span = (long)(Math.Max(5, zoomSeconds) * TimeSpan.TicksPerSecond);
-            long end = snapshot.TimeTicks - (long)(scrollSeconds * TimeSpan.TicksPerSecond);
-            long future = scrollSeconds == 0 ? Math.Max(TimeSpan.TicksPerSecond, span / 25) : 0;
-            end = Math.Max(1, Math.Min(DateTime.MaxValue.Ticks - future, end)) + future;
-            long begin = Math.Max(1, end - span);
-            if (end <= begin) return false;
-            from = new DateTime(begin); to = new DateTime(end);
-            timeAnchorTicks = new[] { begin, end };
+            if (timeNavigation == null) timeNavigation = new TimeNavigation(VisibleSeconds);
+            double elapsed = displayedEventClock == 0 ? 0 : Math.Max(0, (now - displayedEventClock) * 1000.0 / Stopwatch.Frequency);
+            TimeRange range = timeNavigation.Range(snapshot.TimeTicks, elapsed, SmoothScroll && snapshot.Connected, MaximumSmoothLeadMilliseconds);
+            if (!initialHistoryApplied)
+            {
+                initialHistoryApplied = true;
+                if (HistoryOffsetSeconds > 0)
+                {
+                    FreezeDisplay();
+                    timeNavigation.PanSeconds(-HistoryOffsetSeconds);
+                    range = timeNavigation.LastRange;
+                }
+            }
+            zoomSeconds = range.SpanTicks / (double)TimeSpan.TicksPerSecond;
+            from = new DateTime(range.FromTicks); to = new DateTime(range.ToTicks);
+            timeAnchorTicks = new[] { range.FromTicks, range.ToTicks };
             timeAnchorX = new[] { left, right };
             return true;
+        }
+
+        private void DrawTimeGrid(DateTime from, DateTime to, float left, float right, float top, float bottom)
+        {
+            TimeGridResult grid = NiceTimeGrid.Build(from.Ticks, to.Ticks, right - left, 110);
+            foreach (long ticks in grid.Ticks)
+            {
+                float x = TimeX(ticks);
+                RenderTarget.DrawLine(new Vector2(x, top), new Vector2(x, bottom), Brush(new Rgb(190, 201, 216), 0.10), 0.7f);
+            }
         }
 
         private void DrawTimeAxis(DateTime from, DateTime to, float left, float right, float bottom, Rgb background)
         {
             RenderTarget.FillRectangle(new RectangleF(left, bottom - 22, right - left, 22), Brush(background));
             RenderTarget.DrawLine(new Vector2(left, bottom - 22), new Vector2(right, bottom - 22), Brush(new Rgb(80, 96, 107)), 1);
-            int labels = Math.Max(2, (int)((right - left) / 115));
-            for (int i = 0; i <= labels; i++)
+            TimeGridResult grid = NiceTimeGrid.Build(from.Ticks, to.Ticks, right - left, 110);
+            float labelWidth = Math.Min(100, right - left), previousRight = left - 4;
+            foreach (long ticks in grid.Ticks)
             {
-                long ticks = from.Ticks + (long)((to.Ticks - from.Ticks) * (i / (double)labels));
-                float x = left + (right - left) * i / labels;
-                string label = new DateTime(ticks).ToString(zoomSeconds < 20 ? "HH:mm:ss.fff" : "HH:mm:ss", CultureInfo.InvariantCulture);
-                Text(label, Math.Max(left, Math.Min(right - 80, x - 38)), bottom - 19, 80, 17, Brush(new Rgb(196, 209, 219)), true);
+                float x = TimeX(ticks);
+                string format = grid.IntervalTicks < TimeSpan.TicksPerSecond ? "HH:mm:ss.fff" :
+                    grid.IntervalTicks >= TimeSpan.TicksPerHour ? "MM-dd HH:mm" : "HH:mm:ss";
+                float labelLeft = Math.Max(left, Math.Min(right - labelWidth, x - labelWidth / 2));
+                if (labelLeft < previousRight + 4) continue;
+                Text(new DateTime(ticks).ToString(format, CultureInfo.InvariantCulture), labelLeft, bottom - 19, labelWidth, 17,
+                    Brush(new Rgb(196, 209, 219)), true, true);
+                previousRight = labelLeft + labelWidth;
             }
+        }
+
+        private void DrawNavigation(EngineSnapshot snapshot, float left, float right, float bottom, Rgb background)
+        {
+            float y = bottom - NavigationHeight;
+            RenderTarget.FillRectangle(new RectangleF(left, y, right - left, NavigationHeight), Brush(background));
+            float buttonWidth = Math.Min(66, (right - left) / (OwnPriceScale ? 4 : 3));
+            liveButton = new RectangleF(left + 3, y + 2, buttonWidth - 3, 21);
+            pauseButton = new RectangleF(left + buttonWidth + 3, y + 2, buttonWidth - 3, 21);
+            if (OwnPriceScale) centerButton = new RectangleF(left + buttonWidth * 2 + 3, y + 2, Math.Min(94, right - left - buttonWidth * 2 - 6), 21);
+            NavigationButton(liveButton, "Live", !DisplayPaused);
+            NavigationButton(pauseButton, "Pause", DisplayPaused);
+            if (OwnPriceScale) NavigationButton(centerButton, priceCentered ? "Centered" : "Center price", priceCentered);
+            float textX = OwnPriceScale ? centerButton.X + centerButton.Width + 8 : pauseButton.X + pauseButton.Width + 8;
+            string state = DisplayPaused ? "PAUSED · snapshot " + new DateTime(snapshot.TimeTicks).ToString("HH:mm:ss.fff", CultureInfo.InvariantCulture) + " · capture active" :
+                (SmoothScroll ? "LIVE · smooth display" : "LIVE · event clock");
+            Text(state, textX, y + 4, right - textX - 4, 18, Brush(DisplayPaused ? new Rgb(255, 211, 115) : new Rgb(162, 204, 190)), true);
+        }
+
+        private void NavigationButton(RectangleF bounds, string label, bool active)
+        {
+            RenderTarget.FillRectangle(bounds, Brush(active ? new Rgb(47, 95, 103) : new Rgb(42, 56, 65)));
+            Text(label, bounds.X + 2, bounds.Y + 2, bounds.Width - 4, 18, Brush(new Rgb(230, 239, 243)), true, true);
+        }
+
+        private void DrawOwnPriceAxis(RenderPriceScale scale, float x, float top, float bottom, Rgb background)
+        {
+            RenderTarget.FillRectangle(new RectangleF(x, top, PriceAxisWidth, bottom - top), Brush(background));
+            RenderTarget.DrawLine(new Vector2(x, top), new Vector2(x, bottom), Brush(new Rgb(82, 103, 114)), 1);
+            Text("PRICE", x + 4, top + 4, PriceAxisWidth - 8, 18, Brush(new Rgb(213, 221, 231)), true);
+            if (DisplayPaused) Text("PAUSED", x + 4, top + 23, PriceAxisWidth - 8, 17, Brush(new Rgb(255, 211, 115)), true);
+            long step = PriceGridStep(scale);
+            long first = (long)Math.Ceiling(scale.MinValue / instrumentTickSize / step) * step;
+            for (long tick = first; tick * instrumentTickSize <= scale.MaxValue; tick += step)
+            {
+                float y = scale.GetYByValue(tick * instrumentTickSize);
+                RenderTarget.DrawLine(new Vector2(x, y), new Vector2(x + 4, y), Brush(new Rgb(137, 161, 175)), 1);
+                Text(PriceText(tick * instrumentTickSize), x + 6, Math.Max(scale.Top, Math.Min(scale.Bottom - 17, y - 8)),
+                    PriceAxisWidth - 9, 17, Brush(new Rgb(207, 220, 229)), true, false, true);
+            }
+        }
+
+        private long PriceGridStep(RenderPriceScale scale)
+        {
+            double wanted = (scale.MaxValue - scale.MinValue) / instrumentTickSize / Math.Max(2, priceArea.Height / 35);
+            double magnitude = Math.Pow(10, Math.Floor(Math.Log10(Math.Max(1, wanted))));
+            double value = wanted / magnitude;
+            return Math.Max(1, (long)((value <= 1 ? 1 : value <= 2 ? 2 : value <= 5 ? 5 : 10) * magnitude));
         }
 
         private bool BuildTimeMap(ChartControl chart, float left, float right, out DateTime from, out DateTime to)
@@ -1155,7 +1428,7 @@ namespace NinjaTrader.NinjaScript.Indicators
 
         private long sceneVersion = -1;
 
-        private void DrawHeat(ChartControl chart, ChartScale scale, Viewport view, RenderScene scene, float left)
+        private void DrawHeat(ChartControl chart, RenderPriceScale scale, Viewport view, RenderScene scene, float left)
         {
             RenderTarget.AntialiasMode = AntialiasMode.Aliased;
             double duration = view.ToTicks - view.FromTicks, range = view.MaxPriceTick - view.MinPriceTick;
@@ -1175,10 +1448,9 @@ namespace NinjaTrader.NinjaScript.Indicators
             }
         }
 
-        private void DrawPriceGrid(ChartScale scale, float left, float right, float top, float bottom)
+        private void DrawPriceGrid(RenderPriceScale scale, float left, float right, float top, float bottom)
         {
-            double span = (scale.MaxValue - scale.MinValue) / instrumentTickSize;
-            long step = Math.Max(1, (long)Math.Ceiling(span / Math.Max(2, (bottom - top) / 45)));
+            long step = PriceGridStep(scale);
             long first = (long)Math.Ceiling(scale.MinValue / instrumentTickSize / step) * step;
             for (long tick = first; tick * instrumentTickSize <= scale.MaxValue; tick += step)
             {
@@ -1187,7 +1459,7 @@ namespace NinjaTrader.NinjaScript.Indicators
             }
         }
 
-        private void DrawCurrentProjection(ChartScale scale, EngineSnapshot data, RenderScene scene, float left, float right, float top, float bottom)
+        private void DrawCurrentProjection(RenderPriceScale scale, EngineSnapshot data, RenderScene scene, float left, float right, float top, float bottom)
         {
             if (!data.Connected || !data.HasDepth || data.TimeTicks < cachedViewport.FromTicks || data.TimeTicks >= cachedViewport.ToTicks) return;
             float x = Math.Max(left, TimeX(data.TimeTicks));
@@ -1200,12 +1472,12 @@ namespace NinjaTrader.NinjaScript.Indicators
             }
             DrawProjectedRows(scale, data.Bids, x, right, Math.Max(1, maximum));
             DrawProjectedRows(scale, data.Asks, x, right, Math.Max(1, maximum));
-            RenderTarget.DrawLine(new Vector2(x, top + 115), new Vector2(x, bottom - 24), Brush(new Rgb(205, 222, 230), 0.65), 1);
-            Text("NOW", x - 27, top + 98, 54, 15, Brush(new Rgb(220, 232, 238)), true, true);
+            RenderTarget.DrawLine(new Vector2(x, top), new Vector2(x, bottom), Brush(new Rgb(205, 222, 230), 0.65), 1);
+            Text(DisplayPaused ? "PAUSED" : "NOW", x - 27, top + 3, 54, 15, Brush(new Rgb(220, 232, 238)), true, true);
             // Forward projection is deliberately translucent and never saved as history.
         }
 
-        private void DrawProjectedRows(ChartScale scale, DepthLevel[] levels, float from, float to, double maximum)
+        private void DrawProjectedRows(RenderPriceScale scale, DepthLevel[] levels, float from, float to, double maximum)
         {
             foreach (DepthLevel row in levels)
             {
@@ -1225,15 +1497,14 @@ namespace NinjaTrader.NinjaScript.Indicators
             return double.IsNaN(value) || double.IsInfinity(value) ? "—" : Instrument.MasterInstrument.FormatPrice(value);
         }
 
-        private void DrawCurrentPrices(ChartScale scale, EngineSnapshot data, float left, float right, float top, float bottom, Rgb buy, Rgb sell)
+        private void DrawCurrentPrices(RenderPriceScale scale, EngineSnapshot data, float left, float right, float top, float bottom, Rgb buy, Rgb sell)
         {
-            double bid, ask;
-            lock (engineGate) { bid = latestBid; ask = latestAsk; }
+            double bid = displayedBid, ask = displayedAsk;
             if (!data.Connected) bid = ask = double.NaN;
             if (data.Bids.Length > 0) bid = data.Bids[0].Tick * instrumentTickSize;
             if (data.Asks.Length > 0) ask = data.Asks[0].Tick * instrumentTickSize;
             TradeRecord last = data.Trades.Length == 0 ? null : data.Trades[data.Trades.Length - 1];
-            string lastLabel = Interlocked.Read(ref lastTradeClock) == 0 || !data.Connected ||
+            string lastLabel = DisplayPaused ? "PAUSED LAST" : displayedTradeClock == 0 || !data.Connected ||
                 last != null && last.TimeTicks < data.SessionStartTicks ? "RECORDED LAST" : "LAST";
             float cursor = left + 7;
             QuoteHeaderPart(lastLabel + " " + (last == null ? "—" : PriceText(last.PriceTick * instrumentTickSize)) + "   ",
@@ -1278,15 +1549,15 @@ namespace NinjaTrader.NinjaScript.Indicators
             }
         }
 
-        private void PriceGuide(ChartScale scale, double price, string label, float left, float right, float top, float bottom, Rgb color,
+        private void PriceGuide(RenderPriceScale scale, double price, string label, float left, float right, float top, float bottom, Rgb color,
             LastExecutionSummary execution = null, Rgb buy = default(Rgb), Rgb sell = default(Rgb))
         {
             float actual = scale.GetYByValue(price);
-            float limit = bottom - (ShowCumulativeDelta || ShowVolumeBars ? Math.Min(LowerPanelHeight, ChartPanel.H * 0.35f) : 0) - 26;
-            if (actual >= top && actual <= limit)
+            float limit = priceArea.Y + priceArea.Height;
+            if (actual >= priceArea.Y && actual <= limit)
                 RenderTarget.DrawLine(new Vector2(left, actual), new Vector2(right, actual), Brush(color, label == null ? 0.35 : 0.75), label == null ? 0.7f : 1.1f);
             if (label == null || !ShowLastPriceBadge) return;
-            float minimum = top + (ShowHeaderBackground ? (ShowImbalance ? 126 : 102) : 5);
+            float minimum = priceArea.Y;
             bool quantities = execution != null && execution.HasTrade;
             float badgeHeight = quantities ? 57 : 19;
             if (limit - minimum < badgeHeight) { quantities = false; badgeHeight = 19; }
@@ -1310,11 +1581,10 @@ namespace NinjaTrader.NinjaScript.Indicators
             }
         }
 
-        private void DrawHoverDetails(ChartScale scale, EngineSnapshot data, Viewport view, float left, float right, float top, float bottom, Rgb background)
+        private void DrawHoverDetails(RenderPriceScale scale, EngineSnapshot data, Viewport view, float left, float right, float top, float bottom, Rgb background)
         {
-            float plotBottom = bottom - (ContinuousTimeView ? 23 : 0) -
-                (ShowCumulativeDelta || ShowVolumeBars ? Math.Min(LowerPanelHeight, ChartPanel.H * 0.35f) : 0);
-            float inspectionTop = top + (ShowHeaderBackground ? (ShowImbalance ? 126 : 102) : 0);
+            float plotBottom = priceArea.Y + priceArea.Height;
+            float inspectionTop = priceArea.Y;
             if (!hoverActive || cachedScene == null || hoverX < left || hoverX >= right || hoverY < inspectionTop || hoverY >= plotBottom) return;
             // Native bar mode can have nonlinear time spacing. Hit circles in actual
             // rendering pixels, then query heat separately using the mapped data time.
@@ -1324,13 +1594,13 @@ namespace NinjaTrader.NinjaScript.Indicators
             {
                 Bubble b = selected[i];
                 screenBubbles[i] = new Bubble { X = TimeX(b.TimeTicks) - left,
-                    Y = scale.GetYByValue(b.PriceTick * instrumentTickSize) - top,
+                    Y = scale.GetYByValue(b.PriceTick * instrumentTickSize) - inspectionTop,
                     Radius = b.Radius, TimeTicks = b.TimeTicks, FromTicks = b.FromTicks, ToTicks = b.ToTicks,
                     PriceTick = b.PriceTick, MinPriceTick = b.MinPriceTick, MaxPriceTick = b.MaxPriceTick,
                     Buy = b.Buy, Sell = b.Sell, Unknown = b.Unknown };
             }
             HoverInspectionResult screenHit = HoverInspection.Inspect(data, new RenderScene { Bubbles = screenBubbles }, view,
-                hoverX - left, hoverY - top, MaximumRenderedBubbles);
+                hoverX - left, hoverY - inspectionTop, MaximumRenderedBubbles);
             long time = TimeAtX(hoverX);
             double price = scale.GetValueByY(hoverY) / instrumentTickSize;
             double modelX = (time - view.FromTicks) / (double)(view.ToTicks - view.FromTicks) * view.Width;
@@ -1399,7 +1669,7 @@ namespace NinjaTrader.NinjaScript.Indicators
                     Brush(i == 0 ? new Rgb(255, 224, 138) : new Rgb(230, 239, 243)), i != 0);
         }
 
-        private void HighlightHoveredQuote(ChartScale scale, HoverLiquidityInfo depth, float left, float right, float top, float bottom)
+        private void HighlightHoveredQuote(RenderPriceScale scale, HoverLiquidityInfo depth, float left, float right, float top, float bottom)
         {
             double bidDistance = depth.BestBidTick.HasValue ? Math.Abs(scale.GetYByValue(depth.BestBidTick.Value * instrumentTickSize) - hoverY) : double.PositiveInfinity;
             double askDistance = depth.BestAskTick.HasValue ? Math.Abs(scale.GetYByValue(depth.BestAskTick.Value * instrumentTickSize) - hoverY) : double.PositiveInfinity;
@@ -1414,7 +1684,7 @@ namespace NinjaTrader.NinjaScript.Indicators
             RenderTarget.DrawLine(new Vector2(x0, y), new Vector2(x1, y), Brush(color), QuoteLineWidth + 2);
         }
 
-        private void DrawStudyLines(ChartScale scale, ProfileResult studies, float left, float right)
+        private void DrawStudyLines(RenderPriceScale scale, ProfileResult studies, float left, float right)
         {
             if (studies == null) return;
             if (ShowPoc && studies.PocTick.HasValue) StudyLine(scale, studies.PocTick.Value * instrumentTickSize, "POC", left, right, new Rgb(249, 180, 84));
@@ -1436,7 +1706,7 @@ namespace NinjaTrader.NinjaScript.Indicators
             }
         }
 
-        private void StudyLine(ChartScale scale, double price, string label, float left, float right, Rgb color)
+        private void StudyLine(RenderPriceScale scale, double price, string label, float left, float right, Rgb color)
         {
             float y = scale.GetYByValue(price);
             if (y < ChartPanel.Y || y > ChartPanel.Y + ChartPanel.H) return;
@@ -1455,7 +1725,7 @@ namespace NinjaTrader.NinjaScript.Indicators
             Text(text, left + 7, top + 103, right - left - 65, 18, Brush(studies.BookImbalance >= 0 ? buy : sell), true);
         }
 
-        private void DrawFootprints(ChartScale scale, ProfileResult studies, long from, long to, Rgb buy, Rgb sell)
+        private void DrawFootprints(RenderPriceScale scale, ProfileResult studies, long from, long to, Rgb buy, Rgb sell)
         {
             if (studies == null) return;
             foreach (FootprintBar bar in studies.Footprints)
@@ -1476,7 +1746,7 @@ namespace NinjaTrader.NinjaScript.Indicators
             }
         }
 
-        private void DrawFlowMarkers(ChartScale scale, OrderFlowResult flow, long from, long to, Rgb buy, Rgb sell)
+        private void DrawFlowMarkers(RenderPriceScale scale, OrderFlowResult flow, long from, long to, Rgb buy, Rgb sell)
         {
             RenderTarget.AntialiasMode = AntialiasMode.PerPrimitive;
             foreach (FlowMarker marker in flow.Markers)
@@ -1499,12 +1769,23 @@ namespace NinjaTrader.NinjaScript.Indicators
                 if (FlowMarkerLabels)
                 {
                     string quantity = marker.Volume > 0 ? marker.Volume.ToString(CultureInfo.InvariantCulture) : marker.Quantity.ToString("0.#", CultureInfo.InvariantCulture);
-                    Text(label + " " + quantity, x + 7, y - 8, 90, 16, Brush(color), true);
+                    string text = label + " " + quantity;
+                    float availableWidth = Math.Min(150, priceArea.Width - 10);
+                    using (TextLayout layout = new TextLayout(NinjaTrader.Core.Globals.DirectWriteFactory, text, smallFormat, availableWidth, 18))
+                    {
+                        layout.WordWrapping = WordWrapping.NoWrap;
+                        float width = Math.Min(availableWidth, layout.Metrics.WidthIncludingTrailingWhitespace) + 6;
+                        float labelX = Math.Max(priceArea.X + 2, Math.Min(priceArea.X + priceArea.Width - width - 2, x + 7));
+                        float labelY = Math.Max(priceArea.Y + 2, Math.Min(priceArea.Y + priceArea.Height - 20, y - 9));
+                        RenderTarget.FillRectangle(new RectangleF(labelX, labelY, width, 18), Brush(new Rgb(18, 26, 31)));
+                        RenderTarget.DrawRectangle(new RectangleF(labelX, labelY, width, 18), Brush(color, 0.65), 0.7f);
+                        RenderTarget.DrawTextLayout(new Vector2(labelX + 3, labelY + 1), layout, Brush(color), DrawTextOptions.Clip);
+                    }
                 }
             }
         }
 
-        private void DrawBestQuotes(ChartControl chart, ChartScale scale, EngineSnapshot data, long from, long to, Rgb buy, Rgb sell)
+        private void DrawBestQuotes(ChartControl chart, RenderPriceScale scale, EngineSnapshot data, long from, long to, Rgb buy, Rgb sell)
         {
             HeatFrame previous = null;
             foreach (HeatFrame frame in data.Frames)
@@ -1519,7 +1800,7 @@ namespace NinjaTrader.NinjaScript.Indicators
             }
         }
 
-        private void DrawQuoteStep(ChartScale scale, float x0, float x1, long? tick, long? oldTick, Rgb color)
+        private void DrawQuoteStep(RenderPriceScale scale, float x0, float x1, long? tick, long? oldTick, Rgb color)
         {
             if (!tick.HasValue) return;
             float y = scale.GetYByValue(tick.Value * instrumentTickSize);
@@ -1528,7 +1809,7 @@ namespace NinjaTrader.NinjaScript.Indicators
             RenderTarget.DrawLine(new Vector2(x0, y), new Vector2(x1, y), brush, QuoteLineWidth);
         }
 
-        private void DrawBubbles(ChartControl chart, ChartScale scale, Bubble[] bubbles, Rgb buy, Rgb sell, Rgb unknown)
+        private void DrawBubbles(ChartControl chart, RenderPriceScale scale, Bubble[] bubbles, Rgb buy, Rgb sell, Rgb unknown)
         {
             RenderTarget.AntialiasMode = AntialiasMode.PerPrimitive;
             // Largest first keeps smaller overlapping executions visible. The data and profiles remain unchanged.
@@ -1557,6 +1838,8 @@ namespace NinjaTrader.NinjaScript.Indicators
                     FillEllipseSlice(ellipse, first, second, buy);
                     FillEllipseSlice(ellipse, second, x + radius, unknown);
                 }
+                else if (BubbleColors == BubbleColorMode.Dominant)
+                    RenderTarget.FillEllipse(ellipse, Brush(Visualization.DominantBubbleColor(b, buy, sell, unknown), BubbleOpacity));
                 else
                 {
                     double angle = -Math.PI / 2;
@@ -1631,36 +1914,34 @@ namespace NinjaTrader.NinjaScript.Indicators
             return end;
         }
 
-        private void DrawProfiles(ChartScale scale, EngineSnapshot data, RenderScene scene, float x, float top, float bottom, Rgb buy, Rgb sell, Rgb unknown, Rgb background)
+        private void DrawProfiles(RenderPriceScale scale, EngineSnapshot data, RenderScene scene, float x, float top, float bottom, Rgb buy, Rgb sell, Rgb unknown, Rgb background)
         {
+            double pixelsPerTick = (scale.Bottom - scale.Top) / ((scale.MaxValue - scale.MinValue) / instrumentTickSize);
+            int bookTicks = CobLabels ? ColumnAggregation.ChooseTicksPerRow(pixelsPerTick, 18) : 1;
+            int profileTicks = ProfileLabels ? ColumnAggregation.ChooseTicksPerRow(pixelsPerTick, 18) : 1;
             if (ShowCurrentBook)
             {
-                PanelHeader(CobCumulative ? "COB · cumulative" : "COB", x, top, bottom, background);
-                int bidCount = CobBids ? BookRowCount(data.Bids, CobBidRows) : 0;
-                int askCount = CobAsks ? BookRowCount(data.Asks, CobAskRows) : 0;
-                decimal maximum = 1;
-                decimal bidTotal = BookSideTotal(data.Bids, bidCount, ref maximum);
-                decimal askTotal = BookSideTotal(data.Asks, askCount, ref maximum);
-                if (CobCumulative) maximum = Math.Max(1, Math.Max(bidTotal, askTotal));
-                DrawBookSide(scale, data.Bids, bidCount, bidTotal, maximum, x, top, bottom, buy);
-                DrawBookSide(scale, data.Asks, askCount, askTotal, maximum, x, top, bottom, sell);
+                PanelHeader("COB", CobCumulative ? "cumulative / side" : "captured book", bookTicks, x, top, bottom, background);
+                BookColumnResult book = ColumnAggregation.Book(CobBids ? data.Bids : new DepthLevel[0],
+                    CobAsks ? data.Asks : new DepthLevel[0], CobBidRows, CobAskRows, bookTicks, CobCumulative);
+                DrawBookRows(scale, book, x, top, bottom, buy, sell);
                 x += ProfileWidth;
             }
             if (ShowSessionProfile)
             {
-                PanelHeader("SVP · recorded", x, top, bottom, background);
-                ProfileBars(scale, data.Profile, x, top, bottom, buy, sell, unknown);
+                PanelHeader("SVP", "recorded session", profileTicks, x, top, bottom, background);
+                ProfileBars(scale, ColumnAggregation.Profile(data.Profile, profileTicks), x, top, bottom, buy, sell, unknown);
                 x += ProfileWidth;
             }
             if (ShowVisibleProfile)
             {
-                PanelHeader("CVP · visible", x, top, bottom, background);
-                ProfileBars(scale, scene.VisibleProfile, x, top, bottom, buy, sell, unknown);
+                PanelHeader("CVP", "visible range", profileTicks, x, top, bottom, background);
+                ProfileBars(scale, ColumnAggregation.Profile(scene.VisibleProfile, profileTicks), x, top, bottom, buy, sell, unknown);
                 x += ProfileWidth;
             }
             if (ShowTpoProfile && cachedStudies != null)
             {
-                PanelHeader("TPO · prints", x, top, bottom, background);
+                PanelHeader("TPO", "captured prints", TpoGroupTicks, x, top, bottom, background);
                 int maximum = 1;
                 foreach (TpoLevel row in cachedStudies.TpoLevels) maximum = Math.Max(maximum, row.Count);
                 foreach (TpoLevel row in cachedStudies.TpoLevels)
@@ -1680,50 +1961,64 @@ namespace NinjaTrader.NinjaScript.Indicators
             }
         }
 
-        private void PanelHeader(string label, float x, float top, float bottom, Rgb background)
+        private void PanelHeader(string label, string detail, int ticksPerRow, float x, float top, float bottom, Rgb background)
         {
             RenderTarget.FillRectangle(new RectangleF(x, top, ProfileWidth, bottom - top), Brush(background));
             RenderTarget.DrawLine(new Vector2(x, top), new Vector2(x, bottom), Brush(new Rgb(82, 92, 106)), 1);
-            Text(label, x + 4, top + 4, ProfileWidth - 8, 20, Brush(new Rgb(213, 221, 231)), true);
+            Text((DisplayPaused ? "PAUSED " : "") + label, x + 4, top + 4, ProfileWidth - 8, 18,
+                Brush(DisplayPaused ? new Rgb(255, 211, 115) : new Rgb(213, 221, 231)), true);
+            Text(detail, x + 4, top + 23, ProfileWidth - 8, 16, Brush(new Rgb(159, 179, 193)), true);
+            Text(ticksPerRow > 1 ? "Σ " + ticksPerRow.ToString(CultureInfo.InvariantCulture) + " ticks" : "1 tick",
+                x + 4, top + 40, ProfileWidth - 8, 16, Brush(new Rgb(159, 179, 193)), true);
         }
 
-        private static int BookRowCount(DepthLevel[] rows, int limit)
+        private static string ColumnQuantity(decimal quantity)
         {
-            return limit <= 0 ? rows.Length : Math.Min(rows.Length, limit);
+            decimal absolute = Math.Abs(quantity);
+            if (absolute >= 1000000000000m) return (quantity / 1000000000000m).ToString("0.##", CultureInfo.InvariantCulture) + "T";
+            if (absolute >= 1000000000m) return (quantity / 1000000000m).ToString("0.##", CultureInfo.InvariantCulture) + "B";
+            if (absolute >= 1000000m) return (quantity / 1000000m).ToString("0.##", CultureInfo.InvariantCulture) + "M";
+            if (absolute >= 10000m) return (quantity / 1000m).ToString("0.##", CultureInfo.InvariantCulture) + "K";
+            return quantity.ToString("0.##", CultureInfo.InvariantCulture);
         }
 
-        private static decimal BookSideTotal(DepthLevel[] rows, int count, ref decimal maximum)
+        private string BookLabel(decimal quantity, decimal sideTotal)
         {
-            // Decimal keeps sums of bounded Int64 provider quantities exact.
-            decimal total = 0;
-            for (int i = 0; i < count; i++)
+            return CobPercentages && sideTotal > 0
+                ? (100 * quantity / sideTotal).ToString("0.#", CultureInfo.InvariantCulture) + "%"
+                : ColumnQuantity(quantity);
+        }
+
+        private void DrawBookRows(RenderPriceScale scale, BookColumnResult book, float x, float top, float bottom, Rgb buy, Rgb sell)
+        {
+            foreach (BookColumnRow row in book.Rows)
             {
-                total += rows[i].Quantity;
-                maximum = Math.Max(maximum, rows[i].Quantity);
-            }
-            return total;
-        }
-
-        private void DrawBookSide(ChartScale scale, DepthLevel[] rows, int count, decimal sideTotal, decimal maximum,
-            float x, float top, float bottom, Rgb color)
-        {
-            decimal cumulative = 0;
-            for (int i = 0; i < count; i++)
-            {
-                DepthLevel level = rows[i];
-                cumulative += level.Quantity;
-                decimal quantity = CobCumulative ? cumulative : level.Quantity;
                 float y, height;
-                if (!ColumnRow(scale, level.Tick, 1, top, bottom, out y, out height)) continue;
-                float width = (float)(quantity / maximum * (ProfileWidth - 8));
+                if (!ColumnRow(scale, row.FirstTick, row.TickCount, top, bottom, out y, out height)) continue;
+                float bidWidth = (float)(row.Bid / book.Maximum * (ProfileWidth - 8));
+                float askWidth = (float)(row.Ask / book.Maximum * (ProfileWidth - 8));
+                float cursor = ColumnBarX(x, bidWidth + askWidth, CobAlignRight);
                 if (ShowCobBars)
-                    RenderTarget.FillRectangle(new RectangleF(ColumnBarX(x, width, CobAlignRight), y, width, height), Brush(color, 0.8));
-                if (CobLabels && height >= 11)
                 {
-                    string label = CobPercentages && sideTotal > 0
-                        ? (100 * quantity / sideTotal).ToString("0.0", CultureInfo.InvariantCulture) + "%"
-                        : quantity.ToString("0", CultureInfo.InvariantCulture);
-                    Text(label, x + 4, y, ProfileWidth - 8, height, Brush(new Rgb(235, 241, 245)), true, false, CobAlignRight);
+                    if (bidWidth > 0) RenderTarget.FillRectangle(new RectangleF(cursor, y, bidWidth, height), Brush(buy, 0.8));
+                    if (askWidth > 0) RenderTarget.FillRectangle(new RectangleF(cursor + bidWidth, y, askWidth, height), Brush(sell, 0.8));
+                }
+                if (CobLabels)
+                {
+                    float labelY = y + Math.Max(0, (height - 17) / 2);
+                    if (row.BidLevels > 0 && row.AskLevels > 0)
+                    {
+                        // A bin can cross the spread: keep both captured sides visible.
+                        float half = (ProfileWidth - 8) / 2;
+                        Text("B " + BookLabel(row.Bid, book.BidTotal), x + 4, labelY, half, Math.Min(17, height), Brush(new Rgb(235, 241, 245)), true);
+                        Text("A " + BookLabel(row.Ask, book.AskTotal), x + 4 + half, labelY, half, Math.Min(17, height), Brush(new Rgb(235, 241, 245)), true, false, true);
+                    }
+                    else
+                    {
+                        bool bid = row.BidLevels > 0;
+                        Text((bid ? "B " : "A ") + BookLabel(bid ? row.Bid : row.Ask, bid ? book.BidTotal : book.AskTotal),
+                            x + 4, labelY, ProfileWidth - 8, Math.Min(17, height), Brush(new Rgb(235, 241, 245)), true, false, CobAlignRight);
+                    }
                 }
             }
         }
@@ -1733,32 +2028,33 @@ namespace NinjaTrader.NinjaScript.Indicators
             return x + 3 + (alignRight ? ProfileWidth - 8 - width : 0);
         }
 
-        private bool ColumnRow(ChartScale scale, double firstTick, int tickCount, float top, float bottom, out float y, out float height)
+        private bool ColumnRow(RenderPriceScale scale, double firstTick, int tickCount, float top, float bottom, out float y, out float height)
         {
             y = scale.GetYByValue((firstTick + tickCount - 0.5) * instrumentTickSize);
             float end = scale.GetYByValue((firstTick - 0.5) * instrumentTickSize);
             height = 0;
-            if (float.IsNaN(y) || float.IsInfinity(y) || float.IsNaN(end) || float.IsInfinity(end) || end <= top + 26 || y >= bottom) return false;
+            float usableTop = Math.Max(top + 58, scale.Top), usableBottom = Math.Min(bottom, scale.Bottom);
+            if (float.IsNaN(y) || float.IsInfinity(y) || float.IsNaN(end) || float.IsInfinity(end) || end <= usableTop || y >= usableBottom) return false;
             float rowHeight = Math.Max(1, end - y - 0.4f);
-            float rowBottom = Math.Min(bottom, y + rowHeight);
-            y = Math.Max(top + 26, y);
+            float rowBottom = Math.Min(usableBottom, y + rowHeight);
+            y = Math.Max(usableTop, y);
             height = rowBottom - y;
             return height > 0;
         }
 
-        private void ProfileBars(ChartScale scale, ProfileLevel[] profile, float x, float top, float bottom, Rgb buy, Rgb sell, Rgb unknown)
+        private void ProfileBars(RenderPriceScale scale, ProfileColumnRow[] profile, float x, float top, float bottom, Rgb buy, Rgb sell, Rgb unknown)
         {
-            double max = 1;
-            foreach (ProfileLevel level in profile) max = Math.Max(max, ProfileDelta ? Math.Abs((double)(level.Buy - level.Sell)) : level.Total);
-            foreach (ProfileLevel level in profile)
+            decimal max = 1;
+            foreach (ProfileColumnRow level in profile) max = Math.Max(max, ProfileDelta ? Math.Abs(level.Delta) : level.Total);
+            foreach (ProfileColumnRow level in profile)
             {
                 float y0, height;
-                if (!ColumnRow(scale, level.Tick, 1, top, bottom, out y0, out height)) continue;
-                double quantity = ProfileDelta ? Math.Abs((double)(level.Buy - level.Sell)) : level.Total;
+                if (!ColumnRow(scale, level.FirstTick, level.TickCount, top, bottom, out y0, out height)) continue;
+                decimal quantity = ProfileDelta ? Math.Abs(level.Delta) : level.Total;
                 float cursor = ColumnBarX(x, (float)(quantity / max * (ProfileWidth - 8)), ProfileAlignRight);
                 if (ShowProfileBars && ProfileDelta)
                 {
-                    double delta = level.Buy - level.Sell;
+                    decimal delta = level.Delta;
                     RenderTarget.FillRectangle(new RectangleF(cursor, y0, (float)(Math.Abs(delta) / max * (ProfileWidth - 8)), height), Brush(delta >= 0 ? buy : sell, 0.8));
                 }
                 else if (ShowProfileBars)
@@ -1770,8 +2066,9 @@ namespace NinjaTrader.NinjaScript.Indicators
                     RenderTarget.FillRectangle(new RectangleF(cursor, y0, buyWidth, height), Brush(buy, 0.8)); cursor += buyWidth;
                     RenderTarget.FillRectangle(new RectangleF(cursor, y0, unknownWidth, height), Brush(unknown, 0.8));
                 }
-                if (ProfileLabels && height >= 11)
-                    Text((ProfileDelta ? level.Buy - level.Sell : level.Total).ToString(CultureInfo.InvariantCulture), x + 4, y0, ProfileWidth - 8, height, Brush(new Rgb(235, 241, 245)), true, false, ProfileAlignRight);
+                if (ProfileLabels)
+                    Text(ColumnQuantity(ProfileDelta ? level.Delta : level.Total), x + 4, y0 + Math.Max(0, (height - 17) / 2), ProfileWidth - 8,
+                        Math.Min(17, height), Brush(new Rgb(235, 241, 245)), true, false, ProfileAlignRight);
             }
         }
 
@@ -1848,17 +2145,18 @@ namespace NinjaTrader.NinjaScript.Indicators
                 Text("Bubble render cap: " + MaximumRenderedBubbles + "/" + scene.Bubbles.Length + " (totals preserved)", left + 7, top + 123, right - left - 14, 16, Brush(new Rgb(246, 195, 120)), true);
         }
 
-        private void DrawStatus(EngineSnapshot data, float left, float top, float right, long now)
+        private void DrawStatus(EngineSnapshot data, float left, float top, float right)
         {
-            long depthClock = Interlocked.Read(ref lastDepthClock);
-            string note, calendarWarning;
-            lock (engineGate) { note = connectionNote; calendarWarning = sessionWarning; }
-            double age = depthClock == 0 ? double.PositiveInfinity : (now - depthClock) / (double)Stopwatch.Frequency;
+            // Status belongs to the same display snapshot as the book and studies.
+            // A paused inspection must not age or inherit a later connection/session.
+            long depthClock = displayedDepthClock;
+            string note = displayedConnectionNote, calendarWarning = displayedSessionWarning;
+            double age = depthClock == 0 ? double.PositiveInfinity : (displayedRenderClock - depthClock) / (double)Stopwatch.Frequency;
             string health = !data.Connected ? "DISCONNECTED" : !data.HasDepth ? "WAITING FOR LEVEL II" :
                 age > StaleDepthSeconds ? "No recent depth updates / replay may be paused" : "Depth captured";
             string details = health + " · " + data.Bids.Length + "/" + data.Asks.Length + " levels · " +
                 data.TradeEvents.ToString("N0", CultureInfo.InvariantCulture) + " trades";
-            if (data.InvalidEvents > 0 || data.LateEvents > 0) details += " · invalid " + data.InvalidEvents + ", late " + data.LateEvents;
+            if (data.InvalidEvents > 0 || data.LateEvents > 0) details += " · invalid " + data.InvalidEvents + ", timestamp adjustments " + data.LateEvents;
             if (data.DroppedFrames > 0 || data.DroppedTrades > 0) details += " · retained history trimmed";
             Text(details, left + 7, top + 29, right - left - 14, 18,
                 Brush(data.HasDepth && data.Connected ? new Rgb(184, 201, 212) : new Rgb(246, 195, 120)), true);
@@ -1873,8 +2171,8 @@ namespace NinjaTrader.NinjaScript.Indicators
             {
                 string coverage = data.Frames.Length == 0 ? "Depth recording started" :
                     "Captured from " + new DateTime(data.Frames[0].FromTicks).ToString("HH:mm:ss", CultureInfo.InvariantCulture);
-                coverage += " · " + historyNote;
-                if (ShowCurrentDepthProjection) coverage += " · shaded right of NOW = current book";
+                coverage += " · " + displayedHistoryNote;
+                if (ShowCurrentDepthProjection) coverage += DisplayPaused ? " · shaded right = snapshot book" : " · shaded right of NOW = current book";
                 Text(coverage, left + 7, top + 68, right - left - 14, 30, Brush(new Rgb(159, 179, 193)), true);
             }
         }
@@ -1917,10 +2215,10 @@ namespace NinjaTrader.NinjaScript.Indicators
             MinimumLiquidity = 1;
             TopLiquidityPercent = 100;
             AutomaticContrast = true;
-            ContrastPercentile = 97;
-            ManualHeatMaximum = 200;
-            HeatGamma = 2;
-            HeatFloorPercent = 20;
+            ContrastPercentile = 100;
+            ManualHeatMaximum = 100;
+            HeatGamma = 1.4;
+            HeatFloorPercent = 10;
             Palette = HeatPalette.Classic;
             HeatColumnPixels = 2;
             HeatOpacity = 0.95;
@@ -1980,6 +2278,13 @@ namespace NinjaTrader.NinjaScript.Indicators
             ShowStatus = true;
             SaveCapturedHistory = true;
             ContinuousTimeView = true;
+            UseNativePriceScale = false;
+            AutoCenterPrice = true;
+            VisiblePriceTicks = 80;
+            PauseOnHover = false;
+            SmoothScroll = false;
+            MaximumSmoothLeadMilliseconds = 500;
+            ShowTimeGrid = true;
             VisibleSeconds = 120;
             HistoryOffsetSeconds = 0;
             ShowCurrentPrice = true;
@@ -2029,7 +2334,37 @@ namespace NinjaTrader.NinjaScript.Indicators
 
         #region User settings
         [NinjaScriptProperty]
-        [Display(Name = "Show on-chart display controls", Description = "Reserves a right sidebar for brightness, heat cutoffs, bubble volume/size and the heat ceiling. Controls change display only and also work during Playback pauses.", GroupName = "3c. Quick controls", Order = 1)]
+        [Display(Name = "Use native price scale", Description = "Use the host chart price transform. Off gives the continuous viewport its own centered price axis without modifying chart-scale properties.", GroupName = "3a. Time and current price", Order = 10)]
+        public bool UseNativePriceScale { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Auto center price", Description = "Initially follow the current market in the usable heatmap area. Alt price zoom or pan releases centering; Center price restores it.", GroupName = "3a. Time and current price", Order = 11)]
+        public bool AutoCenterPrice { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(2, 1000000000)]
+        [Display(Name = "Visible price ticks", Description = "Initial price span for the continuous viewport. Alt+wheel zooms around the pointer.", GroupName = "3a. Time and current price", Order = 12)]
+        public int VisiblePriceTicks { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Pause on hover", Description = "Temporarily freeze all displayed panels while the pointer inspects the price area. Leaving resumes live unless a manual navigation action froze history.", GroupName = "3a. Time and current price", Order = 13)]
+        public bool PauseOnHover { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Smooth scroll", Description = "Optional bounded display-clock interpolation. Does not extend recorded heat, change capture, or create executions.", GroupName = "3a. Time and current price", Order = 14)]
+        public bool SmoothScroll { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0, 60000)]
+        [Display(Name = "Maximum smooth lead (ms)", Description = "Maximum display-only clock lead beyond the latest actual event.", GroupName = "3a. Time and current price", Order = 15)]
+        public int MaximumSmoothLeadMilliseconds { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Show time grid", Description = "Vertical clock-aligned grid at readable millisecond, second, minute or hour intervals.", GroupName = "3a. Time and current price", Order = 16)]
+        public bool ShowTimeGrid { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Show on-chart display controls", Description = "Reserves a right sidebar for tone, heat cutoffs, bubble volume/size and the heat ceiling. Controls change display only and also work during Playback pauses.", GroupName = "3c. Quick controls", Order = 1)]
         public bool ShowQuickControls { get; set; }
 
         [NinjaScriptProperty]
@@ -2172,12 +2507,12 @@ namespace NinjaTrader.NinjaScript.Indicators
         public double TopLiquidityPercent { get; set; }
 
         [NinjaScriptProperty]
-        [Display(Name = "Automatic contrast", Description = "Uses a robust visible-window percentile; panning may change the color scale.", GroupName = "2. Heatmap", Order = 5)]
+        [Display(Name = "Automatic contrast", Description = "Session ceiling expands for larger observed heat and never shrinks as history scrolls out. Filter, percentile or recording changes reset it; tone, cutoff and palette preserve it.", GroupName = "2. Heatmap", Order = 5)]
         public bool AutomaticContrast { get; set; }
 
         [NinjaScriptProperty]
         [Range(1, 100)]
-        [Display(Name = "Contrast percentile", Description = "Upper color reference among the selected heat cells.", GroupName = "2. Heatmap", Order = 6)]
+        [Display(Name = "Contrast percentile", Description = "100 uses the largest selected observed quantity. Lower values use a percentile ceiling and can saturate larger quantities.", GroupName = "2. Heatmap", Order = 6)]
         public double ContrastPercentile { get; set; }
 
         [NinjaScriptProperty]
@@ -2187,7 +2522,7 @@ namespace NinjaTrader.NinjaScript.Indicators
 
         [NinjaScriptProperty]
         [Range(0.05, 20)]
-        [Display(Name = "Heat contrast exponent", Description = "A value above one suppresses low intensities.", GroupName = "2. Heatmap", Order = 8)]
+        [Display(Name = "Tone (gamma)", Description = "A value above one suppresses low intensities.", GroupName = "2. Heatmap", Order = 8)]
         public double HeatGamma { get; set; }
 
         [NinjaScriptProperty]
@@ -2201,7 +2536,7 @@ namespace NinjaTrader.NinjaScript.Indicators
 
         [NinjaScriptProperty]
         [Range(0, 1)]
-        [Display(Name = "Heat opacity", Description = "Opacity from zero to one.", GroupName = "2. Heatmap", Order = 11)]
+        [Display(Name = "Dimming / opacity", Description = "Opacity from zero to one.", GroupName = "2. Heatmap", Order = 11)]
         public double HeatOpacity { get; set; }
 
         [NinjaScriptProperty]
@@ -2317,7 +2652,7 @@ namespace NinjaTrader.NinjaScript.Indicators
         public double MaximumBubbleRadius { get; set; }
 
         [NinjaScriptProperty]
-        [Display(Name = "Bubble color mode", Description = "Gradient, area-correct split, or buy/sell/unknown pie.", GroupName = "4. Trade bubbles", Order = 11)]
+        [Display(Name = "Bubble color mode", Description = "Gradient, area-correct split, buy/sell/unknown pie, or dominant side. Dominant is neutral for ties and unknown-majority clusters.", GroupName = "4. Trade bubbles", Order = 11)]
         public BubbleColorMode BubbleColors { get; set; }
 
         [NinjaScriptProperty]
@@ -2360,7 +2695,7 @@ namespace NinjaTrader.NinjaScript.Indicators
         public int ProfileWidth { get; set; }
 
         [NinjaScriptProperty]
-        [Display(Name = "Profile quantity labels", Description = "Shows numbers in session, visible and TPO profiles when rows have enough height. Independent of COB numbers and profile bars.", GroupName = "5. Profiles", Order = 5)]
+        [Display(Name = "Profile quantity labels", Description = "Session and visible profiles sum adjacent ticks into readable rows labeled with their tick count. TPO labels use the configured TPO grouping. Independent of COB numbers and profile bars.", GroupName = "5. Profiles", Order = 5)]
         public bool ProfileLabels { get; set; }
 
         [NinjaScriptProperty]
@@ -2380,7 +2715,7 @@ namespace NinjaTrader.NinjaScript.Indicators
         public bool ShowCobBars { get; set; }
 
         [NinjaScriptProperty]
-        [Display(Name = "Show COB numbers", Description = "Shows quantities or percentages when price rows have enough height. Independent of profile labels and COB bars.", GroupName = "5a. Current order book", Order = 2)]
+        [Display(Name = "Show COB numbers", Description = "Groups adjacent ticks when needed so quantities or percentages stay readable; grouped rows are labeled with their tick count. Independent of profile labels and COB bars.", GroupName = "5a. Current order book", Order = 2)]
         public bool CobLabels { get; set; }
 
         [NinjaScriptProperty]
@@ -2439,7 +2774,7 @@ namespace NinjaTrader.NinjaScript.Indicators
         public bool SaveCapturedHistory { get; set; }
 
         [NinjaScriptProperty]
-        [Display(Name = "Continuous seconds viewport", Description = "Uses its own labeled time axis inside the panel. Native price coordinates remain in use. Ctrl+wheel zooms; Shift+wheel scrolls.", GroupName = "3a. Time and current price", Order = 1)]
+        [Display(Name = "Continuous seconds viewport", Description = "Uses its own time axis and, by default, centered price axis. Ctrl+wheel zooms at the pointer; Shift+wheel freezes history; Alt+drag pans.", GroupName = "3a. Time and current price", Order = 1)]
         public bool ContinuousTimeView { get; set; }
 
         [NinjaScriptProperty]
@@ -2449,7 +2784,7 @@ namespace NinjaTrader.NinjaScript.Indicators
 
         [NinjaScriptProperty]
         [Range(0, 86400)]
-        [Display(Name = "History offset (seconds)", Description = "Zero follows the latest actual captured event. Positive values show earlier saved capture. Shift+wheel adjusts this offset.", GroupName = "3a. Time and current price", Order = 3)]
+        [Display(Name = "History offset (seconds)", Description = "Initial offset only. Positive values freeze an absolute history interval; Live resumes the newest capture.", GroupName = "3a. Time and current price", Order = 3)]
         public int HistoryOffsetSeconds { get; set; }
 
         [NinjaScriptProperty]

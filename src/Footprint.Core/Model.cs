@@ -6,7 +6,7 @@ namespace FootprintIndicator.Core
     public enum DepthMutation { Insert, Update, Remove }
     public enum TradeSide { Buy, Sell, Unknown }
     public enum ClusterMode { Pixel, Smart, Time, Volume, Price, PriceAndSide, Individual }
-    public enum BubbleColorMode { Gradient, Split, Pie }
+    public enum BubbleColorMode { Gradient, Split, Pie, Dominant }
     public enum HeatPalette { Classic, Grayscale, Ice }
 
     public sealed class EngineSettings
@@ -89,7 +89,9 @@ namespace FootprintIndicator.Core
         public double FollowingSizeRatio = 3.0, FollowingSizeTolerance = 0.35;
         public double MinimumLiquidity = 1, TopLiquidityPercent = 100;
         public bool AutomaticContrast = true;
-        public double ContrastPercentile = 97, ManualMaximum = 200, Gamma = 1;
+        public double ContrastPercentile = 100, ManualMaximum = 200, Gamma = 1;
+        // Optional held automatic ceiling supplied by the host. Manual mode ignores it.
+        public double AutomaticContrastMinimum = 0;
         // Fraction of the contrast ceiling mapped to the dark background before gamma.
         public double HeatFloorPercent = 0;
         public HeatPalette Palette = HeatPalette.Classic;

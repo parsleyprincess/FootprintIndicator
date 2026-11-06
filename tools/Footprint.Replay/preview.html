@@ -12,22 +12,24 @@
 <label>Liquidity <select id="filter"><option value="False">Raw depth</option><option value="True">1.25 s level persistence</option><option value="Following">Persistence + following filter</option></select></label>
 <label>Bubbles <select id="cluster"><option>Smart</option><option>Pixel</option></select></label>
 <label>Color <select id="palette"><option>Classic</option><option>Grayscale</option><option>Ice</option></select></label>
-<label>Contrast <select id="contrast"><option value="normal">Normal · γ 1 / floor 0%</option><option value="focused" selected>Focused · γ 2 / floor 20%</option></select></label>
-<label>Style <select id="style"><option value="pie">Flat split pie</option><option value="3d">3D gradient</option><option value="2d">2D gradient</option></select></label>
+<label>Contrast <select id="contrast"><option value="balanced" selected>Balanced · γ 1.4 / floor 10% / max</option><option value="normal">Normal · γ 1 / floor 0% / max</option><option value="focused">Earlier focused · γ 2 / floor 20% / p98</option></select></label>
+<label>Style <select id="style"><option value="dominant">Dominant side</option><option value="pie">Flat split pie</option><option value="3d">3D gradient</option><option value="2d">2D gradient</option></select></label>
 <label>Study <select id="study"><option value="none">None</option><option value="absorption">Absorption</option><option value="sweeps">Sweeps</option><option value="large">Large executions</option><option value="refill">Replenishment candidates</option><option value="levels">POC / value area / VWAP bands</option><option value="footprint">10 s footprints</option><option value="tpo">1 min TPO counts</option></select></label>
 <span id="status"></span>
 </nav>
 <div class="inspection-controls"><label>Inspection example <select id="inspection"><option value="none">Choose a captured sample</option></select></label><small>Selected crosshair and readout come from a captured C# hover inspection. Browser preview uses a separate renderer.</small></div>
+<div class="inspection-controls"><span id="column-summary"></span><span id="grid-summary"></span><small>Σ = summed contracts across the stated tick interval.</small></div>
 <canvas id="chart" width="1520" height="900" aria-label="Synthetic liquidity heatmap with execution bubbles, order-book profile, one-second volume and cumulative delta"></canvas>
 <section id="inspection-card" hidden aria-live="polite"><div id="inspection-title"></div><div id="inspection-summary"></div><small>Depth values are time-weighted frame averages in contracts, not individual order counts. Display heat can aggregate or suppress captured depth.</small><details><summary>Exact C# inspection result</summary><pre id="inspection-output"></pre></details></section>
 <footer><span class="note">This is a browser rendering of tested C# engine output, not a NinjaTrader runtime screenshot.</span> The input is synthetic and is not a trading signal.
-<details><summary>What this replay demonstrates</summary>Bright bands at fixed prices coexist with large near-touch quotes that move with price. The persistence filter evaluates aggregate quantity at an absolute price. The optional following filter suppresses large bands after repeated matching movements relative to the best quote; it can also hide legitimate liquidity. Neither filter identifies individual orders or duplicates TraderMap Pro’s proprietary Bot Remover. A three-second disconnect at 14:31 creates a visible gap. Changing zoom recomputes clusters in C#; a print-size filter and a displayed-cluster filter are separate. The focused preset uses gamma 2 and a 20% heat floor. Every palette color is exported from C# after that mapping. Bubble radii use a fixed 100-contract reference, and the lower panel uses C# one-second buckets and shared session scale bounds. Inspection examples are finite, precomputed core results at marked coordinates; this browser page does not run the NinjaTrader hover handler. Smart clustering and the palette are original approximations. Unknown aggressor volume remains neutral. Profile and CVD totals use all accepted trades.</details></footer>
+<details><summary>What this replay demonstrates</summary>Bright bands at fixed prices coexist with large near-touch quotes that move with price. The persistence filter evaluates aggregate quantity at an absolute price. The optional following filter suppresses large bands after repeated matching movements relative to the best quote; it can also hide legitimate liquidity. Neither filter identifies individual orders or duplicates TraderMap Pro’s proprietary Bot Remover. A three-second disconnect at 14:31 creates a visible gap. Changing zoom selects clusters recomputed in C#. The balanced preset uses gamma 1.4, a 10% heat floor, and the observed maximum; the earlier focused preset remains available for comparison. Palette and dominant-side colors are exported from C#. Dominant-side ties and unknown-majority bubbles are neutral; pie sectors retain each side’s share. Bubble radii use a fixed 100-contract reference. Readable COB and SVP rows contain C# grouped sums with a minimum 14-pixel row height, and clock lines use absolute C# grid intervals. The lower panel uses C# one-second buckets and shared session scale bounds. Inspection examples are finite, precomputed core results at marked coordinates. Smart clustering and the palette are original approximations. Profile and CVD totals use all accepted trades.</details>
+<details><summary>Captured navigation model examples</summary><p>These finite C# results demonstrate paused intervals and time zoom anchors. They do not exercise NinjaTrader mouse handling.</p><div id="navigation-examples"></div></details></footer>
 <script id="fixture" type="application/json">__REPLAY_JSON__</script>
 <script>
 'use strict';
 const data=JSON.parse(document.getElementById('fixture').textContent),canvas=document.getElementById('chart'),g=canvas.getContext('2d');
 const L=20,T=38,W=1200,H=640,BUY='#2acb8b',SELL='#e15348',UNKNOWN='#aeb8c4';
-const ctrl=id=>document.getElementById(id),color=(b)=>{let total=b.Buy+b.Sell+b.Unknown;if(!total)return UNKNOWN;let buy=b.Buy/total,sell=b.Sell/total,unknown=b.Unknown/total;return `rgb(${Math.round(42*buy+225*sell+174*unknown)},${Math.round(203*buy+83*sell+184*unknown)},${Math.round(139*buy+72*sell+196*unknown)})`};
+const ctrl=id=>document.getElementById(id);
 function timeLabel(t,precise=false){const ms=(t-data.startTicks)/10000;return new Date(Date.UTC(2026,9,23,14,30)+ms).toISOString().slice(11,precise?23:19)}
 function drawStudy(v,x,y){
  const p=v.profile,mode=ctrl('study').value,view=v.viewport,row=H/(view.MaxPriceTick-view.MinPriceTick);
@@ -53,7 +55,8 @@ function activeView(){
  const key=[ctrl('range').value,ctrl('filter').value,ctrl('cluster').value].join(':');
  const base=data.views.find(view=>view.key===key);
  if(!base)throw new Error('Missing C# replay view '+key);
- return ctrl('contrast').value==='focused'?{...base,...base.focused,key:key+':focused'}:base;
+ const preset=ctrl('contrast').value;
+ return preset==='normal'?base:{...base,...base[preset],key:key+':'+preset};
 }
 function selectedInspection(v){
  return v.hoverExamples.find(sample=>sample.key===ctrl('inspection').value)||null;
@@ -142,6 +145,7 @@ function draw(){
 const v=activeView(),s=v.scene,view=v.viewport;
 syncInspection(v);
 const x=t=>L+(t-view.FromTicks)/(view.ToTicks-view.FromTicks)*W,y=p=>T+(view.MaxPriceTick-p)/(view.MaxPriceTick-view.MinPriceTick)*H;
+const gridX=t=>L+Number(BigInt(t)-BigInt(view.FromTicks))/(view.ToTicks-view.FromTicks)*W;
 g.clearRect(0,0,canvas.width,canvas.height);g.fillStyle='#1b292f';g.fillRect(0,0,canvas.width,canvas.height);g.font='12px ui-monospace,monospace';
 g.fillStyle='#91aebd';g.fillText('ES  •  SYNTHETIC  •  0.25 TICK',L,23);g.fillText(`HEAT SCALE  ${s.HeatMaximum.toFixed(0)} contracts  •  ${{True:'PERSISTENT LEVELS',False:'RAW OBSERVATIONS',Following:'PERSISTENCE + FOLLOWING FILTER'}[ctrl('filter').value]}`,L+550,23);
 g.save();g.beginPath();g.rect(L,T,W,H);g.clip();
@@ -151,22 +155,35 @@ for(let i=0;i<s.Heat.length;i++){const tile=s.Heat[i];g.fillStyle=shades[i];g.fi
 const ga=x(data.startTicks+600000000),gb=x(data.startTicks+630000000);
 if(gb>L&&ga<L+W){g.fillStyle='#182126';g.fillRect(ga,T,gb-ga,H);g.fillStyle='#8a9fa8';g.save();g.translate((ga+gb)/2,T+H/2);g.rotate(-Math.PI/2);g.textAlign='center';g.fillText('DEPTH GAP',0,0);g.restore()}
 g.lineWidth=.6;g.strokeStyle='#b3cad326';for(let tick=Math.ceil(view.MinPriceTick/4)*4;tick<=view.MaxPriceTick;tick+=4){g.beginPath();g.moveTo(L,y(tick));g.lineTo(L+W,y(tick));g.stroke()}
-g.setLineDash([2,5]);for(let n=0;n<=8;n++){g.beginPath();g.moveTo(L+n*W/8,T);g.lineTo(L+n*W/8,T+H);g.stroke()}g.setLineDash([]);
+g.setLineDash([2,5]);for(const tick of v.timeGrid.Ticks){g.beginPath();g.moveTo(gridX(tick),T);g.lineTo(gridX(tick),T+H);g.stroke()}g.setLineDash([]);
 for(const [prop,c] of [['BestBidTick',BUY],['BestAskTick',SELL]]){g.strokeStyle=c;g.lineWidth=1.3;g.beginPath();let prior=null;for(const f of data.frames){if(f.ToTicks<=view.FromTicks||f.FromTicks>=view.ToTicks||f[prop]===null)continue;let xa=x(f.FromTicks),xb=x(f.ToTicks),yy=y(f[prop]);if(!prior||prior.epoch!==f.Epoch||prior.end!==f.FromTicks)g.moveTo(xa,yy);else g.lineTo(xa,yy);g.lineTo(xb,yy);prior={epoch:f.Epoch,end:f.ToTicks}}g.stroke()}
-for(const b of [...s.Bubbles].sort((a,b)=>b.Radius-a.Radius)){if(b.Radius<=0)continue;let xx=L+b.X,yy=T+b.Y,r=b.Radius;g.save();g.globalAlpha=.83;if(ctrl('style').value==='pie'){let a=-Math.PI/2;for(const [q,c]of [[b.Buy,BUY],[b.Sell,SELL],[b.Unknown,UNKNOWN]]){if(!q)continue;let end=a+q/b.Total*Math.PI*2;g.beginPath();g.moveTo(xx,yy);g.arc(xx,yy,r,a,end);g.closePath();g.fillStyle=c;g.fill();a=end}}else{let c=color(b);if(ctrl('style').value==='3d'){let gradient=g.createRadialGradient(xx-r*.35,yy-r*.4,r*.04,xx,yy,r);gradient.addColorStop(0,'#dcece7');gradient.addColorStop(.24,c);gradient.addColorStop(.75,c);gradient.addColorStop(1,'#233b3b');g.fillStyle=gradient}else g.fillStyle=c;g.beginPath();g.arc(xx,yy,r,0,Math.PI*2);g.fill()}g.strokeStyle='#d3ebdc50';g.lineWidth=.6;g.beginPath();g.arc(xx,yy,r,0,Math.PI*2);g.stroke();g.restore()}
+for(const {b,i} of s.Bubbles.map((b,i)=>({b,i})).sort((a,b)=>b.b.Radius-a.b.Radius)){if(b.Radius<=0)continue;let xx=L+b.X,yy=T+b.Y,r=b.Radius;g.save();g.globalAlpha=.83;if(ctrl('style').value==='pie'){let a=-Math.PI/2;for(const [q,c]of [[b.Buy,BUY],[b.Sell,SELL],[b.Unknown,UNKNOWN]]){if(!q)continue;let end=a+q/b.Total*Math.PI*2;g.beginPath();g.moveTo(xx,yy);g.arc(xx,yy,r,a,end);g.closePath();g.fillStyle=c;g.fill();a=end}}else{let c=ctrl('style').value==='dominant'?v.bubbleColors.dominant[i]:v.bubbleColors.gradient[i];if(ctrl('style').value==='3d'){let gradient=g.createRadialGradient(xx-r*.35,yy-r*.4,r*.04,xx,yy,r);gradient.addColorStop(0,'#dcece7');gradient.addColorStop(.24,c);gradient.addColorStop(.75,c);gradient.addColorStop(1,'#233b3b');g.fillStyle=gradient}else g.fillStyle=c;g.beginPath();g.arc(xx,yy,r,0,Math.PI*2);g.fill()}g.strokeStyle='#d3ebdc50';g.lineWidth=.6;g.beginPath();g.arc(xx,yy,r,0,Math.PI*2);g.stroke();g.restore()}
 g.restore();drawStudy(v,x,y);drawInspection(v);
 // Shared price axis, current order book, and actual session traded profile.
 g.fillStyle='#213139';g.fillRect(L+W,T,canvas.width-L-W,H);g.fillStyle='#c9d9e1';g.font='11px ui-monospace,monospace';g.textAlign='right';for(let tick=Math.ceil(view.MinPriceTick/4)*4;tick<=view.MaxPriceTick;tick+=4)g.fillText((tick*data.tickSize).toFixed(2),L+W+68,y(tick)+4);g.textAlign='left';
-const cobX=L+W+78,pX=cobX+110;g.fillStyle='#c9d9e1';g.fillText('COB',cobX,23);g.fillText('SVP',pX,23);
-let bookMax=Math.max(1,...data.Bids.map(b=>b.Quantity),...data.Asks.map(b=>b.Quantity)),profileMax=Math.max(1,...data.Profile.map(p=>p.Total));const row=H/(view.MaxPriceTick-view.MinPriceTick);
-for(const [levels,c]of [[data.Bids,BUY],[data.Asks,SELL]])for(const b of levels){if(b.Tick<view.MinPriceTick||b.Tick>view.MaxPriceTick)continue;let yy=y(b.Tick)-row/2;g.fillStyle=c;g.globalAlpha=.72;g.fillRect(cobX,yy,b.Quantity/bookMax*94,Math.max(1,row-.6));g.globalAlpha=1;if(row>=10){g.fillStyle='#edf4f7';g.fillText(String(b.Quantity),cobX+2,yy+row-1)}}
-for(const p of data.Profile){if(p.Tick<view.MinPriceTick||p.Tick>view.MaxPriceTick)continue;let xx=pX,yy=y(p.Tick)-row/2;for(const [q,c]of [[p.Buy,BUY],[p.Sell,SELL],[p.Unknown,UNKNOWN]]){g.fillStyle=c;let width=q/profileMax*92;g.fillRect(xx,yy,width,Math.max(1,row-.6));xx+=width}}
-g.fillStyle='#a7bec9';for(let n=0;n<=8;n++){g.textAlign=n===0?'left':n===8?'right':'center';g.fillText(timeLabel(view.FromTicks+(view.ToTicks-view.FromTicks)*n/8),L+n*W/8,T+H+20)}g.textAlign='left';
+const cobX=L+W+78,pX=cobX+110,columns=v.columns;
+g.fillStyle='#c9d9e1';g.fillText(columns.bookLabel,cobX,23);g.fillText(columns.profileLabel,pX,23);
+g.save();g.beginPath();g.rect(cobX,T,canvas.width-cobX,H);g.clip();g.font='10px ui-monospace,monospace';
+function columnRow(item,left,maximum,parts){
+ const yy=y(item.FirstTick+item.TickCount-.5),height=item.TickCount*columns.pixelsPerTick;
+ if(yy+height<T||yy>T+H)return;
+ let xx=left;for(const [quantity,shade]of parts){const width=quantity/maximum*94;g.fillStyle=shade;g.globalAlpha=.72;g.fillRect(xx,yy,width,height-1);xx+=width;}
+ g.globalAlpha=1;const label=String(item.Total),labelWidth=g.measureText(label).width+5;
+ g.fillStyle='#14242cd9';g.fillRect(left+1,yy+height/2-6,labelWidth,12);
+ g.fillStyle='#edf4f7';g.fillText(label,left+3,yy+height/2+4);
+}
+for(const item of columns.book.Rows)columnRow(item,cobX,columns.book.Maximum,[[item.Bid,BUY],[item.Ask,SELL]]);
+for(const item of columns.profile)columnRow(item,pX,columns.profileMaximum,[[item.Buy,BUY],[item.Sell,SELL],[item.Unknown,UNKNOWN]]);
+g.restore();g.font='11px ui-monospace,monospace';
+g.fillStyle='#a7bec9';for(let i=0;i<v.timeGrid.Ticks.length;i++){const xx=gridX(v.timeGrid.Ticks[i]);g.textAlign=xx<L+40?'left':xx>L+W-40?'right':'center';g.fillText(v.timeGrid.labels[i],xx,T+H+20)}g.textAlign='left';
 // Series and scale bounds are generated in C# from captured executions.
 drawLowerPanel(v,x);
 ctrl('status').textContent=`${data.TradeEvents.toLocaleString()} trades · ${s.Bubbles.length.toLocaleString()} bubbles`;
+ctrl('column-summary').textContent=columns.bookLabel+' · '+columns.profileLabel+' · readable grouped quantities';
+ctrl('grid-summary').textContent='Clock grid '+(v.timeGrid.IntervalTicks/10000000)+' s';
 window.previewReady=true;
 }
+for(const sample of data.navigationExamples){const row=document.createElement('div');row.dataset.caseKey=sample.key;row.textContent=sample.label+': '+sample.from+' – '+sample.to+' ('+sample.seconds+' s; '+(sample.IsLive?'live':'paused')+')';ctrl('navigation-examples').append(row);}
 for(const id of ['range','filter','cluster','palette','contrast','style','study','inspection'])ctrl(id).addEventListener('change',draw);
 draw();
 </script>

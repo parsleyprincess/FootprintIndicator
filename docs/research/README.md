@@ -1,6 +1,6 @@
 # Research ledger
 
-Research performed October 22–29, 2026; each report records its own access dates and evidence.
+Research and uploaded-video review performed October 22–November 6, 2026; each report records its own access dates and evidence.
 
 Primary Bookmap product documentation, TraderMap Pro documentation/blog, and actual official screenshots were retrieved and inspected. The initial network restriction was resolved. The documents below separate sourced facts, direct visual observations, independent algorithms, and unavailable proprietary details.
 
@@ -27,3 +27,7 @@ Several official Bookmap video/animation frame sequences and settings screenshot
 The later [October 29 recording](bookmap-oct29-video-review.md) supplies direct views of heat/bubble hover cards, highlighted historical bid/ask paths, time zoom, the native **Contrast black cut-off** and **Volume dots size** sliders, and independent heat dimming. Its `N (n)` right-edge numbers are visible, but the available evidence does not establish their precise semantics. The implementation's explicitly labeled **run / last** statistic is independently defined; it is not claimed as a verified reproduction of that native overlay. The heat floor likewise uses a fraction of the current ceiling rather than claiming Bookmap's percentile/normalization formula.
 
 Research assets remain outside the application checkout at `/workspace/research-assets/`; source URLs and source revisions are recorded in the reports. No proprietary vendor DLLs or third-party chart images are redistributed in the source package.
+
+- [October 30 user recordings and acceptance requirements](bookmap-oct30-user-video-review.md)
+- [All 29 requested add-ons, recording and feed constraints](bookmap-addon-request-matrix.md)
+- [Current user guide](../USER-GUIDE.md)

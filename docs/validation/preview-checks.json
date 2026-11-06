@@ -1,7 +1,14 @@
 {
   "states_rendered": 124,
   "focused_states_checked": 12,
-  "inspection_examples_checked": 108,
+  "balanced_states_checked": 12,
+  "dominant_states_checked": 36,
+  "inspection_examples_checked": 162,
   "javascript_errors": [],
+  "dominant_bubble_colors_checked": 22824,
+  "dominant_examples_checked": 8,
+  "grouped_rows_checked": 996,
+  "absolute_grid_ticks_checked": 84,
+  "navigation_examples_checked": 6,
   "scope": "Standalone preview interactions; not NinjaTrader or pixel-equivalence validation."
 }
